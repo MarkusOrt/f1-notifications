@@ -92,6 +92,7 @@ struct InteractionReceive {
     pub application_id: String,
     #[serde(rename = "type")]
     pub kind: Interaction,
+    pub token: String,
 }
 
 #[derive(Clone, Debug)]
