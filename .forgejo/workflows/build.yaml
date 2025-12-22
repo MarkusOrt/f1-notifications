@@ -1,3 +1,4 @@
+# this is a tests
 on: [push]
 jobs:
   print-content:
