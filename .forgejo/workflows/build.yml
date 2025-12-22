@@ -1,0 +1,48 @@
+name: "Build-and-Check"
+on: [push]
+permissions:
+  contents: write
+  packages: write
+jobs:
+  Build-All-Platforms:
+    name: "Build on all Platforms"
+    runs-on: docker
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: https://codeberg.org/MTO/rust-toolchain@stable
+
+      - run: cargo build
+
+    
+  Cargo-Clippy:
+    name: "Cargo Clippy"
+    runs-on: docker 
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: https://codeberg.org/MTO/rust-toolchain@stable
+        with:
+          components: 'clippy'
+      
+      - run: cargo clippy -- -Dwarnings
+  Rustfmt:
+    name: "Formatting"
+    runs-on: docker
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+    
+      - name: Setup Rust
+        uses: https://codeberg.org/MTO/rust-toolchain@stable
+        with:
+          components: 'rustfmt'
+    
+      - run: cargo fmt --all -- --check
+    
+
+
