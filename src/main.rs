@@ -19,6 +19,8 @@ use tower::ServiceBuilder;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod bot;
+
 #[derive(Debug, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 enum Interaction {

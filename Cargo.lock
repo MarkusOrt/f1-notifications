@@ -561,6 +561,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "f1-bot-types"
+version = "0.1.0"
+source = "git+https://codeberg.org/MTO/f1-bot-types#5223d8adf1fdceb98930e82089a8163b3ad1bb81"
+dependencies = [
+ "chrono",
+ "notifbot-macros",
+ "serde",
+]
+
+[[package]]
 name = "f1-notifications"
 version = "0.1.2"
 dependencies = [
@@ -568,6 +578,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "ed25519-dalek",
+ "f1-bot-types",
  "hex",
  "reqwest",
  "sentry",
@@ -1207,6 +1218,15 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "notifbot-macros"
+version = "0.1.0"
+source = "git+https://codeberg.org/MTO/f1-bot-macros#9179208d16440d03338e5e8631007bef2ac80c96"
+dependencies = [
+ "quote",
+ "syn",
 ]
 
 [[package]]
