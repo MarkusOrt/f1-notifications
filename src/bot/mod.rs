@@ -1,10 +1,26 @@
-use std::fmt::Write as _;
+use std::fmt::Write;
+use std::time::Duration;
 
 use chrono::Utc;
 use f1_bot_types::{Session, Weekend};
+use tokio::sync::broadcast::Receiver;
+use tracing::info;
 
 #[allow(unused)]
-pub async fn bot_thread() {}
+const MAX_WEEKENDS_PER_MESSAGE: u32 = 5;
+
+#[allow(unused)]
+pub async fn bot_thread(mut should_shut_down: Receiver<()>, http: reqwest::Client) {
+    info!("Bot thread starting.");
+    loop {
+        if let Ok(_) = should_shut_down.try_recv() {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_secs(1));
+    }
+    info!("Bot Thread shutdown");
+}
 
 /// Creates the Message String for the F1 Persistent current event message.
 /// This one will strike-through any expired sessions.
@@ -78,9 +94,8 @@ pub fn persistent_msg_feeder(
     Ok(str)
 }
 
-/// Tests whether or not the message parsing works.
-/// Sessions that are done should be updated accordingly.
-/// Testing will be done using Hashes
+/// Tests whether or not the message generation works.
+/// Sessions that are done should be shown strike-through (~~)
 #[test]
 pub fn test_message() {
     use chrono::DateTime;
@@ -134,4 +149,42 @@ pub fn test_message() {
     );
 
     assert_eq!(persistent_msg_feeder([None, None, None]).unwrap(), "");
+
+    let str = persistent_msg_feeder([
+        Some((
+            &Weekend {
+                id: 0,
+                name: "testing".to_string(),
+                year: 2025,
+                start_date: DateTime::parse_from_rfc3339("2025-01-01T06:00:00Z")
+                    .unwrap()
+                    .into(),
+                icon: "testing".to_string(),
+                series: f1_bot_types::Series::F2,
+                status: f1_bot_types::WeekendStatus::Open,
+            },
+            &vec![Session {
+                id: 0,
+                weekend: 0,
+                start_date: DateTime::parse_from_rfc3339("2025-01-01T08:00:00Z")
+                    .unwrap()
+                    .into(),
+                title: "testing".to_string(),
+                kind: f1_bot_types::SessionKind::Racing,
+                duration: 3600,
+                notify: f1_bot_types::SessionNotifySettings::Notify,
+                status: f1_bot_types::SessionStatus::Open,
+            }],
+        )),
+        None,
+        None,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        str,
+        r#"## testing 2025 F2 testing
+> ~~`   testing`: <t:1735718400:F> (<t:1735718400:R>)~~
+"#
+    )
 }

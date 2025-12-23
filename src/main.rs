@@ -1,25 +1,20 @@
 //! This is a Discord Bot that notifies a Channel and Group when a new F1 or
 //! F1-Feeder session starts.
 
-use std::{fmt::Write, str::FromStr};
+use std::str::FromStr;
 
-use axum::{
-    body::Body,
-    extract::State,
-    http::{HeaderMap, Request},
-    response::IntoResponse,
-    routing::post,
-};
-use ed25519_dalek::{Signature, VerifyingKey};
-use reqwest::{StatusCode, header::CONTENT_TYPE};
+use axum::http::HeaderMap;
+use reqwest::header::AUTHORIZATION;
 use sentry::{integrations::tracing::EventFilter, types::Dsn};
 use serde::Deserialize;
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use tower::ServiceBuilder;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::{bot::bot_thread, http::http_api};
+
 mod bot;
+mod http;
 
 #[derive(Debug, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
@@ -97,10 +92,25 @@ struct InteractionReceive {
     pub token: String,
 }
 
-#[derive(Clone, Debug)]
-struct AxumState<'a> {
-    pub public_key: &'a VerifyingKey,
+struct RequiredData {
+    pub bot_token: String,
+    pub public_key: String,
 }
+
+impl RequiredData {
+    pub fn try_new() -> Result<Self, std::env::VarError> {
+        Ok(Self {
+            bot_token: std::env::var("BOT_TOKEN")?,
+            public_key: std::env::var("PUBLIC_KEY")?,
+        })
+    }
+}
+
+const USER_AGENT: &str = concat!(
+    "f1-notifications-client@",
+    env!("CARGO_PKG_VERSION"),
+    " contact: markus_dev @ discord"
+);
 
 fn main() {
     _ = dotenvy::dotenv();
@@ -126,109 +136,51 @@ fn main() {
             }),
         )
         .init();
+
     info!("App Start up at {}", chrono::Utc::now());
+
     sentry::start_session();
+
+    let data = match RequiredData::try_new() {
+        Ok(d) => d,
+        Err(why) => {
+            error!("Error gathering required Configuration: {why:#?}");
+            return;
+        }
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        format!("Bot {}", data.bot_token).parse().unwrap(),
+    );
+    let http_client = reqwest::ClientBuilder::new()
+        .default_headers(headers)
+        .user_agent(USER_AGENT)
+        .build()
+        .unwrap();
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+            let sd1 = shutdown_rx.resubscribe();
+            let http_bot = http_client.clone();
+            let bot_thread = tokio::spawn(async move { bot_thread(sd1, http_bot).await });
+            let http_thread =
+                tokio::spawn(async move { http_api(shutdown_rx, http_client, data).await.unwrap() });
+            tokio::signal::ctrl_c().await.unwrap();
+            info!("Shutdown signal received");
+            shutdown_tx.send(()).unwrap();
 
-        let mut public_key = [0u8; 32];
-        hex::decode_to_slice(std::env::var("PUBLIC_KEY").unwrap(), &mut public_key).unwrap();
-        let vk = Box::leak(Box::new(VerifyingKey::from_bytes(&public_key).unwrap()));
-
-            let router = axum::Router::new()
-                .route("/interaction", post(interaction))
-                .with_state(AxumState {
-                    public_key: vk,
-                })
-                .fallback(fallback)
-                .layer(ServiceBuilder::new()
-                    .layer(sentry::integrations::tower::NewSentryLayer::<Request<Body>>::new_from_top())
-                    .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction())
-                )
-                .into_make_service();
-
-            let tcp_listener = tokio::net::TcpListener::bind("0.0.0.0:8123").await.unwrap();
-            info!("Listener bound to {}", tcp_listener.local_addr().unwrap());
-            axum::serve(tcp_listener, router)
-                .with_graceful_shutdown(async {
-                    tokio::signal::ctrl_c().await.unwrap();
-                })
-                .await
-                .unwrap();
+            bot_thread.await.unwrap();
+            http_thread.await.unwrap();
         });
     sentry::end_session_with_status(sentry::protocol::SessionStatus::Ok);
     if let Some(client) = sentry::Hub::current().client() {
         client.close(Some(std::time::Duration::from_secs(2)));
     }
     drop(sentry_client);
-}
-
-async fn fallback() -> (StatusCode, &'static str) {
-    (StatusCode::NOT_FOUND, "Not Found.")
-}
-
-#[derive(serde::Serialize)]
-struct DiscordResponse {
-    #[serde(rename = "type")]
-    kind: u32,
-}
-
-async fn interaction(
-    State(state): State<AxumState<'_>>,
-    headers: HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    let (Some(signature), Some(timestamp)) = (
-        headers.get("X-Signature-Ed25519"),
-        headers.get("X-Signature-Timestamp"),
-    ) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            HeaderMap::new(),
-            "Unauthorized.".to_owned(),
-        );
-    };
-
-    let (Ok(signature), Ok(timestamp)) = (signature.to_str(), timestamp.to_str()) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            HeaderMap::new(),
-            "Unauthorized.".to_owned(),
-        );
-    };
-
-    let mut decoded_signature = [0u8; 64];
-    hex::decode_to_slice(signature, &mut decoded_signature).unwrap();
-    let sign = Signature::from_bytes(&decoded_signature);
-    let mut message = String::with_capacity(timestamp.len() + body.len());
-    message.write_str(timestamp).unwrap();
-    message.write_str(&body).unwrap();
-    if let Err(why) = state.public_key.verify_strict(message.as_bytes(), &sign) {
-        info!("{why}");
-        return (
-            StatusCode::UNAUTHORIZED,
-            HeaderMap::new(),
-            "Unauthorized.".to_owned(),
-        );
-    }
-
-    let serialized_body: InteractionReceive = serde_json::from_str(&body).unwrap();
-    println!("{serialized_body:#?}");
-    match serialized_body.kind {
-        Interaction::Ping => {
-            let response = serde_json::to_string(&DiscordResponse { kind: 1 }).unwrap();
-            let mut headers = HeaderMap::new();
-            headers.append(CONTENT_TYPE, "application/json".parse().unwrap());
-
-            (StatusCode::OK, headers, response)
-        }
-        _ => (
-            StatusCode::ACCEPTED,
-            HeaderMap::new(),
-            String::with_capacity(0),
-        ),
-    }
 }
