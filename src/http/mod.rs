@@ -1,4 +1,4 @@
-use crate::{Interaction, InteractionReceive};
+use crate::{Interaction, InteractionReceive, http::message::Flags};
 use axum::{
     body::Body,
     extract::State,
@@ -13,16 +13,19 @@ use tokio::sync::broadcast::Receiver;
 use tower::ServiceBuilder;
 use tracing::info;
 
+mod message;
+
 #[derive(Clone, Debug)]
 struct AxumState<'a> {
     pub public_key: &'a VerifyingKey,
-    pub http: reqwest::Client,
+    pub http: crate::bot::http::Http,
 }
 
 pub async fn http_api(
     mut shutdown: Receiver<()>,
-    http: reqwest::Client,
+    http: crate::bot::http::Http,
     data: crate::RequiredData,
+    db_conn: libsql::Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut public_key = [0u8; 32];
     hex::decode_to_slice(data.public_key, &mut public_key)?;
@@ -72,7 +75,7 @@ struct InterResponse {
 #[derive(serde::Serialize)]
 struct Content {
     content: &'static str,
-    flags: u8,
+    flags: u32,
 }
 
 impl InterResponse {
@@ -80,7 +83,7 @@ impl InterResponse {
         kind: 4,
         data: Content {
             content: "This is just a test!",
-            flags: 1 << 6,
+            flags: Flags::EPHEMERAL,
         },
     };
 }
@@ -137,10 +140,7 @@ async fn interaction(
         _ => {
             _ = state
                 .http
-                .post(format!(
-                    "https://discord.com/api/v10/interactions/{}/{}/callback",
-                    serialized_body.id, serialized_body.token
-                ))
+                .interaction_response(serialized_body.id, serialized_body.token)
                 .json(&InterResponse::TESTING_RESPONSE)
                 .send()
                 .await

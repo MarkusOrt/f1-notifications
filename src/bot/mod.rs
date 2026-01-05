@@ -6,18 +6,58 @@ use f1_bot_types::{Session, Weekend};
 use tokio::sync::broadcast::Receiver;
 use tracing::info;
 
+pub mod calendar;
+mod database;
+pub mod http;
+
 #[allow(unused)]
 const MAX_WEEKENDS_PER_MESSAGE: u32 = 5;
 
-#[allow(unused)]
-pub async fn bot_thread(mut should_shut_down: Receiver<()>, http: reqwest::Client) {
+#[derive(serde::Serialize)]
+struct CreateMessage<'a> {
+    content: &'a str,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct CreateMessageResponse {
+    id: String,
+    channel_id: String,
+}
+
+pub async fn bot_thread(
+    mut should_shut_down: Receiver<()>,
+    http: http::Http,
+    db_conn: libsql::Connection,
+) {
     info!("Bot thread starting.");
+    let mut mesasge_hashes = [0u64; 4];
     loop {
         if let Ok(_) = should_shut_down.try_recv() {
             break;
         }
 
-        tokio::time::sleep(Duration::from_secs(1));
+        let Some(f1_weekend) = database::next_weekend(f1_bot_types::Series::F1, &db_conn)
+            .await
+            .unwrap()
+        else {
+            continue;
+        };
+        let sessions_for_f1 = database::sessions_for_weekend(f1_weekend.id as i32, &db_conn)
+            .await
+            .unwrap();
+
+        println!("Weekend: {f1_weekend:#?}");
+        println!("Sessions: {sessions_for_f1:#?}");
+        let msg_content = persistent_msg_f1(&f1_weekend, &sessions_for_f1).unwrap();
+        http.create_message("1002285400095719524")
+            .json(&CreateMessage {
+                content: &msg_content,
+            })
+            .send()
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
     info!("Bot Thread shutdown");
 }
@@ -37,22 +77,24 @@ pub fn persistent_msg_f1(
     )?;
     let now = Utc::now();
     for session in sessions {
-        let tz = session.start_date.timestamp();
+        let tz = session.start_time.timestamp();
         let dur = chrono::Duration::seconds(session.duration.into());
-        if session.start_date + dur < now {
+        if session.start_time + dur < now {
             writeln!(
                 &mut str,
                 "> ~~`{0:>10}`: <t:{1}:F> (<t:{1}:R>)~~",
-                session.title, tz
+                session.name, tz
             )?;
         } else {
             writeln!(
                 &mut str,
                 "> `{0:>10}`: <t:{1}:F> (<t:{1}:R>)",
-                session.title, tz
+                session.name, tz
             )?;
         }
     }
+
+    writeln!(&mut str, "\nUse <id:customize> and get the `f1-notifications` role to receive notifications!");
 
     Ok(str)
 }
@@ -73,19 +115,19 @@ pub fn persistent_msg_feeder(
         )?;
         let now = Utc::now();
         for session in sessions {
-            let tz = session.start_date.timestamp();
+            let tz = session.start_time.timestamp();
             let dur = chrono::Duration::seconds(session.duration.into());
-            if session.start_date + dur < now {
+            if session.start_time + dur < now {
                 writeln!(
                     &mut str,
                     "> ~~`{0:>10}`: <t:{1}:F> (<t:{1}:R>)~~",
-                    session.title, tz
+                    session.name, tz
                 )?;
             } else {
                 writeln!(
                     &mut str,
                     "> `{0:>10}`: <t:{1}:F> (<t:{1}:R>)",
-                    session.title, tz
+                    session.name, tz
                 )?;
             }
         }
@@ -113,27 +155,27 @@ pub fn test_message() {
     let sessions = vec![
         Session {
             id: 0,
-            weekend: 0,
-            start_date: DateTime::parse_from_rfc3339("2025-01-01T08:00:00Z")
+            weekend_id: 0,
+            start_time: DateTime::parse_from_rfc3339("2025-01-01T08:00:00Z")
                 .unwrap()
                 .into(),
-            title: "testing".to_string(),
-            kind: f1_bot_types::session::SessionKind::Racing,
+            name: "testing".to_string(),
             duration: 3600,
             notify: f1_bot_types::session::SessionNotifySettings::Notify,
             status: f1_bot_types::session::SessionStatus::Open,
+            created_at: std::time::UNIX_EPOCH.into(),
         },
         Session {
             id: 1,
-            weekend: 0,
-            start_date: DateTime::parse_from_rfc3339("2222-01-01T08:00:00Z")
+            weekend_id: 0,
+            start_time: DateTime::parse_from_rfc3339("2222-01-01T08:00:00Z")
                 .unwrap()
                 .into(),
-            title: "testing".to_string(),
-            kind: f1_bot_types::session::SessionKind::Racing,
+            name: "testing".to_string(),
             duration: 3600,
             notify: f1_bot_types::session::SessionNotifySettings::Notify,
             status: f1_bot_types::session::SessionStatus::Open,
+            created_at: std::time::UNIX_EPOCH.into(),
         },
     ];
 
@@ -165,22 +207,21 @@ pub fn test_message() {
             },
             &vec![Session {
                 id: 0,
-                weekend: 0,
-                start_date: DateTime::parse_from_rfc3339("2025-01-01T08:00:00Z")
+                weekend_id: 0,
+                start_time: DateTime::parse_from_rfc3339("2025-01-01T08:00:00Z")
                     .unwrap()
                     .into(),
-                title: "testing".to_string(),
-                kind: f1_bot_types::SessionKind::Racing,
+                name: "testing".to_string(),
                 duration: 3600,
                 notify: f1_bot_types::SessionNotifySettings::Notify,
                 status: f1_bot_types::SessionStatus::Open,
+                created_at: std::time::UNIX_EPOCH.into(),
             }],
         )),
         None,
         None,
     ])
     .unwrap();
-
     assert_eq!(
         str,
         r#"## testing 2025 F2 testing

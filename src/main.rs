@@ -3,8 +3,6 @@
 
 use std::str::FromStr;
 
-use axum::http::HeaderMap;
-use reqwest::header::AUTHORIZATION;
 use sentry::{integrations::tracing::EventFilter, types::Dsn};
 use serde::Deserialize;
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -112,7 +110,7 @@ const USER_AGENT: &str = concat!(
     " contact: markus_dev @ discord"
 );
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     _ = dotenvy::dotenv();
     let mut sentry_client = None;
     if let Ok(dsn) = std::env::var("SENTRY_DSN") {
@@ -124,6 +122,7 @@ fn main() {
             ..Default::default()
         }));
     };
+    
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -145,32 +144,31 @@ fn main() {
         Ok(d) => d,
         Err(why) => {
             error!("Error gathering required Configuration: {why:#?}");
-            return;
+            return Err(why.into());
         }
     };
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        format!("Bot {}", data.bot_token).parse().unwrap(),
-    );
-    let http_client = reqwest::ClientBuilder::new()
-        .default_headers(headers)
-        .user_agent(USER_AGENT)
-        .build()
-        .unwrap();
+    let http = crate::bot::http::Http::new(&data.bot_token);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
+
             let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
             let sd1 = shutdown_rx.resubscribe();
-            let http_bot = http_client.clone();
-            let bot_thread = tokio::spawn(async move { bot_thread(sd1, http_bot).await });
+
+            let db_client = libsql::Builder::new_local("database/db").build().await.unwrap();
+            let c1 = db_client.connect().unwrap();
+            let c2 = db_client.connect().unwrap();
+
+            let http_bot = http.clone();
+
+            let bot_thread = tokio::spawn(async move { bot_thread(sd1, http_bot, c1).await });
+
             let http_thread =
-                tokio::spawn(async move { http_api(shutdown_rx, http_client, data).await.unwrap() });
+                tokio::spawn(async move { http_api(shutdown_rx, http, data, c2).await.unwrap() });
+
             tokio::signal::ctrl_c().await.unwrap();
             info!("Shutdown signal received");
             shutdown_tx.send(()).unwrap();
@@ -183,4 +181,5 @@ fn main() {
         client.close(Some(std::time::Duration::from_secs(2)));
     }
     drop(sentry_client);
+    Ok(())
 }
