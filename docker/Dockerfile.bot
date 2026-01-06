@@ -3,15 +3,18 @@ WORKDIR /app
 
 COPY . ./
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static gcc
-RUN cargo build --release
+RUN cargo build --all --release
 
 FROM rust:alpine
 
 WORKDIR /app
 
 COPY --from=builder /app/target/release/f1-notifications /app/f1-notifications
+COPY --from=builder /app/target/release/migrate /app/migrate
 
 RUN chmod +x /app/f1-notifications
+RUN chmod +x /app/migrate
+
 STOPSIGNAL SIGINT
 
 CMD /app/f1-notifications

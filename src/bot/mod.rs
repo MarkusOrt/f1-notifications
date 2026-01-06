@@ -30,7 +30,7 @@ pub async fn bot_thread(
     db_conn: libsql::Connection,
 ) {
     info!("Bot thread starting.");
-    let mut mesasge_hashes = [0u64; 4];
+    let mut message_hashes = [0u64; 4];
     loop {
         if let Ok(_) = should_shut_down.try_recv() {
             break;
@@ -94,7 +94,10 @@ pub fn persistent_msg_f1(
         }
     }
 
-    writeln!(&mut str, "\nUse <id:customize> and get the `f1-notifications` role to receive notifications!");
+    writeln!(
+        &mut str,
+        "\nUse <id:customize> and get the `f1-notifications` role to receive notifications!"
+    );
 
     Ok(str)
 }

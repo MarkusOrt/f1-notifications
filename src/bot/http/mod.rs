@@ -73,4 +73,12 @@ impl Http {
             interaction_token
         ))
     }
+
+    pub fn bulk_delete(&self, channel_id: impl Display) -> RequestBuilder {
+        self.0.post(format!(
+            "{}/channels/{}/messages/bulk-delete",
+            Self::BASE_URL,
+            channel_id
+        ))
+    }
 }

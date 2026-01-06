@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = entry.file_name();
         files.push((name.to_str().unwrap().to_owned(), entry.path()));
     }
-    
+
     _ = std::fs::create_dir("database/");
     let lbsqlc = libsql::Builder::new_local("database/db").build().await?;
     let conn = lbsqlc.connect()?;

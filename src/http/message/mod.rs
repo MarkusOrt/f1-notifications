@@ -1,6 +1,5 @@
 #![allow(unused)]
 
-
 #[allow(non_snake_case)]
 pub mod Flags {
     pub const CROSSPOSTED: u32 = 1 << 0;

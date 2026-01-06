@@ -122,7 +122,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         }));
     };
-    
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -154,11 +153,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .unwrap()
         .block_on(async {
-
             let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
             let sd1 = shutdown_rx.resubscribe();
 
-            let db_client = libsql::Builder::new_local("database/db").build().await.unwrap();
+            let db_client = libsql::Builder::new_local("database/db")
+                .build()
+                .await
+                .unwrap();
             let c1 = db_client.connect().unwrap();
             let c2 = db_client.connect().unwrap();
 
