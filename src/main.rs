@@ -162,22 +162,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let c2 = db_client.connect()?;
 
             let http_bot = http.clone();
+            let mut js = tokio::task::JoinSet::new();
 
-            let bot_thread = tokio::spawn(async move { bot_thread(sd1, http_bot, c1).await });
+            js.spawn(async move { bot_thread(sd1, http_bot, c1).await });
 
-            let http_thread =
-                tokio::spawn(async move { http_api(shutdown_rx, http, data, c2).await });
+            js.spawn(async move { http_api(shutdown_rx, http, data, c2).await });
 
-            tokio::signal::ctrl_c().await?;
-            info!("Shutdown signal received");
-            shutdown_tx.send(())?;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Shutting Down");
+                    shutdown_tx.send(())?;
+                }
+                res = js.join_next() => {
+                    match res {
+                        Some(Err(why)) => {
+                            info!("Thread stopped due to error (see in sentry). Shutting down.");
+                            sentry::capture_error(&why);
+                        },
+                        Some(Ok(Err(why))) => {
+                            info!("Thread stopped due to error (see in sentry). Shutting down.");
+                            sentry::capture_error(&why);
+                        },
+                        _ => ()
+                    }
 
-            if let Err(why) = bot_thread.await? {
-                sentry::capture_error(&why);
+                }
             }
-
-            if let Err(why) = http_thread.await? {
-                sentry::capture_error(&why);
+            while let Some(t) = js.join_next().await {
+                match t {
+                    Err(why) => {
+                        sentry::capture_error(&why);
+                    }
+                    Ok(Err(why)) => {
+                        sentry::capture_error(&why);
+                    }
+                    _ => (),
+                }
             }
 
             Ok::<(), crate::error::Error>(())

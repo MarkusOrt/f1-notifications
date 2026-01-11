@@ -170,7 +170,11 @@ async fn interaction(
                 .await
                 .unwrap();
 
-            sentry::configure_scope(|f| f.set_tag("http.status_code", 202));
+            sentry::configure_scope(|f| {
+                f.set_tag("http.status_code", 202);
+                f.get_span()
+                    .inspect(|f| f.set_status(sentry::protocol::SpanStatus::Ok));
+            });
             (
                 StatusCode::ACCEPTED,
                 HeaderMap::new(),

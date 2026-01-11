@@ -1,5 +1,5 @@
 #![allow(unused)]
-use f1_bot_types::{Message, MessageKind, Series, Session, Weekend, WeekendStatus};
+use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend, WeekendStatus};
 use libsql::params;
 use sentry::{TransactionContext, protocol::TraceId};
 use serde::de::DeserializeOwned;
@@ -118,12 +118,20 @@ pub async fn sessions_for_weekend(
 }
 
 pub async fn next_session(
-    series: Series,
     db_conn: &libsql::Connection,
-) -> Result<Option<Session>, libsql::Error> {
-    _ = series;
-    _ = db_conn;
-    Ok(None)
+    trace_id: TraceId,
+    weekend_id: u64,
+) -> ErrResult<Option<Session>> {
+    self::fetch_optional(
+        db_conn,
+        trace_id,
+        r#"SELECT * FROM sessions 
+        WHERE status != ? 
+        AND weekend_id = ? 
+        ORDER BY start_time ASC"#,
+        params![SessionStatus::Finished, weekend_id],
+    )
+    .await
 }
 
 pub async fn update_message_hash(

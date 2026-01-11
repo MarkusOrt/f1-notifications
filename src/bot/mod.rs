@@ -222,7 +222,6 @@ pub async fn bot_thread(
                 .await?
             }
         }
-
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
     info!("Bot Thread shutdown");

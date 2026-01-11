@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "f1-notifications"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum 0.8.8",
  "chrono",
