@@ -23,10 +23,11 @@ CREATE TABLE IF NOT EXISTS "main"."sessions" (
 
 CREATE TABLE IF NOT EXISTS "main"."messages" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-  "message_discord_id" TEXT NOT NULL,
-  "channel_discord_id" TEXT NOT NULL,
+  "discord_id" TEXT NOT NULL,
+  "discord_channel" TEXT NOT NULL,
   "kind" TEXT NOT NULL,
   "series" TEXT NOT NULL,
+  "hash" TEXT NOT NULL DEFAULT '0',
   "expires_at" TEXT NOT NULL,
   "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', CURRENT_TIMESTAMP))
 );

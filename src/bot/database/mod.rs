@@ -1,50 +1,102 @@
-use f1_bot_types::{Series, Session, Weekend, WeekendStatus};
+#![allow(unused)]
+use f1_bot_types::{Message, MessageKind, Series, Session, Weekend, WeekendStatus};
 use libsql::params;
+use sentry::{TransactionContext, protocol::TraceId};
+use serde::de::DeserializeOwned;
 
 pub async fn weekends_for_series(
-    series: Series,
     db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    series: Series,
 ) -> Result<Vec<Weekend>, libsql::Error> {
-    let mut cursor = db_conn
-        .query("SELECT * FROM weekends WHERE series = ?", params![series])
-        .await?;
-    let mut return_value = Vec::with_capacity(10);
-    while let Ok(Some(value)) = cursor.next().await {
-        return_value.push(libsql::de::from_row::<Weekend>(&value).unwrap());
-    }
-    Ok(return_value)
+    self::fetch(
+        db_conn,
+        trace_id,
+        r#"SELECT * FROM weekends 
+        WHERE series = ? ORDER BY start_date ASC"#,
+        params![series],
+    )
+    .await
 }
 
-pub async fn next_weekend(
-    series: Series,
+pub async fn fetch<T: DeserializeOwned + Sized>(
     db_conn: &libsql::Connection,
-) -> Result<Option<Weekend>, libsql::Error> {
-    let mut cursor = db_conn
-        .query(
-            //"SELECT * FROM weekends WHERE series = ? AND status = ? AND CURRENT_TIMESTAMP > Datetime('start_date', '-7 days') ORDER BY start_date",
-            "SELECT * FROM weekends WHERE series = ? AND status = ? ORDER BY start_date",
-            params![series, WeekendStatus::Open],
-        )
-        .await?;
-    let val = cursor.next().await?;
-    Ok(val.map(|f| libsql::de::from_row(&f).unwrap()))
-}
+    trace_id: TraceId,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<Vec<T>, libsql::Error> {
+    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
+    tx.set_tag("db.operation", "SELECT");
+    tx.set_extra("db.statement", sql.into());
 
-pub async fn sessions_for_weekend(
-    weekend_id: i32,
-    db_conn: &libsql::Connection,
-) -> Result<Vec<Session>, libsql::Error> {
-    let mut cursor = db_conn
-        .query(
-            "SELECT * FROM sessions WHERE weekend_id = ? ORDER BY start_time",
-            params![weekend_id],
-        )
-        .await?;
-    let mut return_value = Vec::with_capacity(5);
+    let mut cursor = db_conn.query(sql, params).await?;
+    let mut return_value: Vec<T> = Vec::new();
     while let Ok(Some(row)) = cursor.next().await {
         return_value.push(libsql::de::from_row(&row).unwrap());
     }
+    tx.set_data("rows_returned", return_value.len().into());
+    tx.set_status(sentry::protocol::SpanStatus::Ok);
+    tx.finish();
     Ok(return_value)
+}
+
+pub async fn fetch_optional<T: DeserializeOwned + Sized>(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<Option<T>, libsql::Error> {
+    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
+    tx.set_tag("db.operation", "SELECT");
+    tx.set_extra("db.statement", sql.into());
+
+    let mut cursor = db_conn.query(sql, params).await?;
+    let mut return_value: Vec<T> = Vec::new();
+    if let Ok(Some(row)) = cursor.next().await {
+        tx.set_data("rows_returned", 1.into());
+        tx.set_status(sentry::protocol::SpanStatus::Ok);
+        tx.finish();
+        Ok(Some(libsql::de::from_row(&row).unwrap()))
+    } else {
+        tx.set_data("rows_returned", 0.into());
+        tx.set_status(sentry::protocol::SpanStatus::Ok);
+        tx.finish();
+        Ok(None)
+    }
+}
+
+pub async fn next_weekend(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    series: Series,
+) -> Result<Option<Weekend>, libsql::Error> {
+    self::fetch_optional(
+        db_conn,
+        trace_id,
+        r#"SELECT * FROM weekends 
+            WHERE series = ? 
+            AND status = ? 
+            ORDER BY start_date
+            LIMIT 1"#,
+        params![series, WeekendStatus::Open],
+    )
+    .await
+}
+
+pub async fn sessions_for_weekend(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    weekend_id: u64,
+) -> Result<Vec<Session>, libsql::Error> {
+    self::fetch(
+        db_conn,
+        trace_id,
+        r#"SELECT * FROM sessions 
+            WHERE weekend_id = ? 
+            ORDER BY start_time"#,
+        params![weekend_id],
+    )
+    .await
 }
 
 pub async fn next_session(
@@ -54,4 +106,85 @@ pub async fn next_session(
     _ = series;
     _ = db_conn;
     Ok(None)
+}
+
+pub async fn update_message_hash(
+    db_conn: &libsql::Connection,
+    message_id: u64,
+    new_hash: String,
+) -> Result<(), libsql::Error> {
+    _ = db_conn
+        .execute(
+            "UPDATE messages SET hash = ? WHERE id = ?",
+            params![new_hash, message_id],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn get_calendar_messages(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    series: Series,
+) -> Result<Vec<Message>, libsql::Error> {
+    self::fetch(
+        db_conn,
+        trace_id,
+        r#"SELECT * FROM messages 
+            WHERE series = ? 
+            AND kind = ?"#,
+        params![series, MessageKind::Calendar],
+    )
+    .await
+}
+
+pub async fn all_sessions(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+) -> Result<Vec<Session>, libsql::Error> {
+    self::fetch(
+        db_conn,
+        trace_id,
+        "SELECT * FROM sessions ORDER BY start_time ASC",
+        params![],
+    )
+    .await
+}
+
+pub async fn insert(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<i64, libsql::Error> {
+    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
+    tx.set_tag("db.operation", "INSERT");
+    tx.set_extra("db.statement", sql.into());
+    let res = db_conn.execute(sql, params).await?;
+    tx.set_tag("rows_affected", res);
+    Ok(db_conn.last_insert_rowid())
+}
+
+pub async fn get_event_message(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    series: Series,
+) -> Result<Option<Message>, libsql::Error> {
+    fetch_optional(
+        db_conn,
+        trace_id,
+        "SELECT * FROM messages WHERE series = ? AND kind = ? LIMIT 1",
+        params![series, MessageKind::Weekend],
+    )
+    .await
+}
+
+pub async fn delete_message(
+    db_conn: &libsql::Connection,
+    message_id: u64,
+) -> Result<(), libsql::Error> {
+    db_conn
+        .execute("DELETE FROM messages WHERE id = ?", params![message_id])
+        .await?;
+    Ok(())
 }

@@ -6,12 +6,12 @@ use std::str::FromStr;
 use sentry::{integrations::tracing::EventFilter, types::Dsn};
 use serde::Deserialize;
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use tracing::{error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::{error, info, level_filters::LevelFilter};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{bot::bot_thread, http::http_api};
 
-mod bot;
+pub mod bot;
 mod http;
 
 #[derive(Debug, Serialize_repr, Deserialize_repr)]
@@ -124,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_filter(LevelFilter::INFO))
         .with(
             sentry::integrations::tracing::layer().event_filter(|f| match *f.level() {
                 tracing::Level::ERROR => EventFilter::Event,

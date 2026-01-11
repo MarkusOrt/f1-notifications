@@ -1,6 +1,6 @@
 [package]
 name = "f1-notifications"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 default-run = "f1-notifications"
 
@@ -11,6 +11,10 @@ path = "tools/docker-build.rs"
 [[bin]]
 name = "migrate"
 path = "tools/migrate.rs"
+
+[[bin]]
+name = "reserve-calendar-space"
+path = "tools/reserve-calendar-space.rs"
 
 [dependencies]
 axum = { version = "0.8.7", features = ["json"] }

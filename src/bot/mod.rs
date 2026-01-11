@@ -1,10 +1,16 @@
-use std::fmt::Write;
 use std::time::Duration;
+use std::{fmt::Write, hash::Hash};
 
 use chrono::Utc;
-use f1_bot_types::{Session, Weekend};
+use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend};
+use libsql::params;
+use sentry::protocol::{TraceContext, TraceId};
 use tokio::sync::broadcast::Receiver;
-use tracing::info;
+use tracing::{info, warn};
+
+use crate::bot::calendar::make_calendar_message_string;
+use crate::bot::database::{get_event_message, update_message_hash};
+use crate::bot::http::Http;
 
 pub mod calendar;
 mod database;
@@ -18,6 +24,7 @@ struct CreateMessage<'a> {
     content: &'a str,
 }
 
+#[allow(unused)]
 #[derive(serde::Deserialize, Debug)]
 struct CreateMessageResponse {
     id: String,
@@ -30,32 +37,219 @@ pub async fn bot_thread(
     db_conn: libsql::Connection,
 ) {
     info!("Bot thread starting.");
-    let mut message_hashes = [0u64; 4];
+    #[allow(unused)]
     loop {
-        if let Ok(_) = should_shut_down.try_recv() {
+        let trace_id = TraceContext::default().trace_id;
+
+        if should_shut_down.try_recv().is_ok() {
             break;
         }
 
-        let Some(f1_weekend) = database::next_weekend(f1_bot_types::Series::F1, &db_conn)
-            .await
-            .unwrap()
-        else {
-            continue;
-        };
-        let sessions_for_f1 = database::sessions_for_weekend(f1_weekend.id as i32, &db_conn)
-            .await
-            .unwrap();
+        let f1_channel = std::env::var("F1_CHANNEL").expect("F1 Channel not set");
+        let feeder_channel = std::env::var("FEEDER_CHANNEL").expect("Feeder Channel not set");
 
-        println!("Weekend: {f1_weekend:#?}");
-        println!("Sessions: {sessions_for_f1:#?}");
-        let msg_content = persistent_msg_f1(&f1_weekend, &sessions_for_f1).unwrap();
-        http.create_message("1002285400095719524")
-            .json(&CreateMessage {
-                content: &msg_content,
-            })
-            .send()
-            .await
+        'calendar: {
+            let calendar_messages = database::get_calendar_messages(&db_conn, trace_id, Series::F1)
+                .await
+                .unwrap();
+            if calendar_messages.len() < 5 {
+                warn!("Skipping Calendar due to insufficient messages (less than 6)!");
+                break 'calendar;
+            }
+            let weekends = database::weekends_for_series(&db_conn, trace_id, Series::F1)
+                .await
+                .unwrap();
+            let sessions = database::all_sessions(&db_conn, trace_id).await.unwrap();
+
+            for (i, message) in calendar_messages.iter().enumerate() {
+                let message_string = make_calendar_message_string(&weekends, &sessions, i).unwrap();
+                let mut hasher = std::hash::DefaultHasher::new();
+                message_string.hash(&mut hasher);
+                let new_hash = std::hash::Hasher::finish(&hasher);
+                let hash: u64 = message.hash.parse().unwrap();
+                if hash == new_hash {
+                    continue;
+                }
+
+                if message_string.len() == 0 {
+                    continue;
+                }
+                let req = http
+                    .edit_message(&message.discord_channel, &message.discord_id)
+                    .json(&CreateMessage {
+                        content: &message_string,
+                    });
+
+                let res = http.execute_request(trace_id, req).await.unwrap();
+                _ = res;
+
+                update_message_hash(&db_conn, message.id, new_hash.to_string())
+                    .await
+                    .unwrap();
+            }
+        }
+
+        {
+            let Some(f1_weekend) = database::next_weekend(&db_conn, trace_id, Series::F1)
+                .await
+                .unwrap()
+            else {
+                continue;
+            };
+            let sessions_for_f1 = database::sessions_for_weekend(&db_conn, trace_id, f1_weekend.id)
+                .await
+                .unwrap();
+            let event_message = match database::get_event_message(&db_conn, trace_id, Series::F1)
+                .await
+                .unwrap()
+            {
+                Some(msg) => msg,
+                None => create_event_message(
+                    &db_conn,
+                    &http,
+                    trace_id,
+                    &f1_channel,
+                    &f1_weekend,
+                    &sessions_for_f1,
+                )
+                .await
+                .unwrap(),
+            };
+            let mut weekend_done = true;
+            // Do not skip empty weekends because sessions might not have been populated yet!
+            if sessions_for_f1.len() == 0 {
+                weekend_done = false;
+            }
+            for session in sessions_for_f1.iter() {
+                if session.status == SessionStatus::Open {
+                    weekend_done = false;
+                }
+            }
+
+            if weekend_done {
+                let res = http
+                    .execute_request(
+                        trace_id,
+                        http.delete_message(
+                            event_message.discord_channel,
+                            event_message.discord_id,
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+
+                _ = res;
+                database::delete_message(&db_conn, event_message.id)
+                    .await
+                    .unwrap();
+
+                continue;
+            }
+
+            let db_hash: u64 = event_message.hash.parse().unwrap();
+            let message_content = persistent_msg_f1(&f1_weekend, &sessions_for_f1).unwrap();
+            let mut hasher = std::hash::DefaultHasher::new();
+            message_content.hash(&mut hasher);
+            let hash = std::hash::Hasher::finish(&hasher);
+            if hash != db_hash {
+                let response = http
+                    .execute_request(
+                        trace_id,
+                        http.edit_message(
+                            &event_message.discord_channel,
+                            &event_message.discord_id,
+                        )
+                        .json(&Content {
+                            content: &message_content,
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+                _ = response;
+            }
+        }
+
+        {
+            let next_f2_weekend = database::next_weekend(&db_conn, trace_id, Series::F2)
+                .await
+                .unwrap();
+            let next_f3_weekend = database::next_weekend(&db_conn, trace_id, Series::F3)
+                .await
+                .unwrap();
+            let next_f1a_weekend = database::next_weekend(&db_conn, trace_id, Series::F1Academy)
+                .await
+                .unwrap();
+            let f2_sessions = match &next_f2_weekend {
+                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id)
+                    .await
+                    .unwrap(),
+                None => Vec::new(),
+            };
+            let f3_sessions = match &next_f3_weekend {
+                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id)
+                    .await
+                    .unwrap(),
+                None => Vec::new(),
+            };
+            let f1a_sessions = match &next_f1a_weekend {
+                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id)
+                    .await
+                    .unwrap(),
+                None => Vec::new(),
+            };
+            let weekends_message = match get_event_message(&db_conn, trace_id, Series::F2)
+                .await
+                .unwrap()
+            {
+                Some(m) => m,
+                None => create_feeder_message(
+                    &db_conn,
+                    &http,
+                    trace_id,
+                    &feeder_channel,
+                    [
+                        (&next_f2_weekend, &f2_sessions),
+                        (&next_f3_weekend, &f3_sessions),
+                        (&next_f1a_weekend, &f1a_sessions),
+                    ],
+                )
+                .await
+                .unwrap(),
+            };
+            let message_content = persistent_msg_feeder([
+                (&next_f2_weekend, &f2_sessions),
+                (&next_f3_weekend, &f3_sessions),
+                (&next_f1a_weekend, &f1a_sessions),
+            ])
             .unwrap();
+            let mut hasher = std::hash::DefaultHasher::new();
+            message_content.hash(&mut hasher);
+            let hash = std::hash::Hasher::finish(&hasher);
+            let message_hash: u64 = weekends_message.hash.parse().unwrap_or_default();
+            if hash != message_hash || hash == 0 || message_hash == 0 {
+                let res = http
+                    .execute_request(
+                        trace_id,
+                        http.edit_message(
+                            weekends_message.discord_channel,
+                            weekends_message.discord_id,
+                        )
+                        .json(&Content::new(&message_content)),
+                    )
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+                _ = res;
+                database::update_message_hash(&db_conn, weekends_message.id, hash.to_string())
+                    .await
+                    .unwrap();
+            }
+        }
 
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
@@ -72,8 +266,8 @@ pub fn persistent_msg_f1(
     let mut str = String::new();
     writeln!(
         &mut str,
-        "## {} {} {}",
-        weekend.icon, weekend.year, weekend.name
+        "## {} {}",
+        weekend.icon, weekend.name
     )?;
     let now = Utc::now();
     for session in sessions {
@@ -106,15 +300,16 @@ pub fn persistent_msg_f1(
 /// this one will be a single message for all three series.
 #[allow(unused)]
 pub fn persistent_msg_feeder(
-    data: [Option<(&Weekend, &Vec<Session>)>; 3],
+    data: [(&Option<Weekend>, &Vec<Session>); 3],
 ) -> Result<String, std::fmt::Error> {
     let mut str = String::new();
+    writeln!(&mut str, "# Next Feeder Events")?;
     let mut data_itr = data.into_iter();
-    while let Some(Some((weekend, sessions))) = data_itr.next() {
+    while let Some((Some(weekend), sessions)) = data_itr.next() {
         writeln!(
             &mut str,
-            "## {} {} {} {}",
-            weekend.icon, weekend.year, weekend.series, weekend.name
+            "## {} {} {}",
+            weekend.icon, weekend.series, weekend.name
         )?;
         let now = Utc::now();
         for session in sessions {
@@ -135,6 +330,10 @@ pub fn persistent_msg_feeder(
             }
         }
     }
+    writeln!(
+        &mut str,
+        "\nGo to <id:customize> and select the [Series]-Notifications role to receive notifications for each series.\nAll Times are in your timezone."
+    )?;
 
     Ok(str)
 }
@@ -186,18 +385,32 @@ pub fn test_message() {
 
     assert_eq!(
         str,
-        r#"## testing 2025 testing
+        r#"## testing testing
 > ~~`   testing`: <t:1735718400:F> (<t:1735718400:R>)~~
 > `   testing`: <t:7952371200:F> (<t:7952371200:R>)
+
+Use <id:customize> and get the `f1-notifications` role to receive notifications!
 "#
         .to_string()
     );
 
-    assert_eq!(persistent_msg_feeder([None, None, None]).unwrap(), "");
+    assert_eq!(
+        persistent_msg_feeder([
+            (&None, &Vec::new()),
+            (&None, &Vec::new()),
+            (&None, &Vec::new())
+        ])
+        .unwrap(),
+        r#"# Next Feeder Events
+
+Go to <id:customize> and select the [Series]-Notifications role to receive notifications for each series.
+All Times are in your timezone.
+"#
+    );
 
     let str = persistent_msg_feeder([
-        Some((
-            &Weekend {
+        (
+            &Some(Weekend {
                 id: 0,
                 name: "testing".to_string(),
                 year: 2025,
@@ -207,7 +420,7 @@ pub fn test_message() {
                 icon: "testing".to_string(),
                 series: f1_bot_types::Series::F2,
                 status: f1_bot_types::WeekendStatus::Open,
-            },
+            }),
             &vec![Session {
                 id: 0,
                 weekend_id: 0,
@@ -220,15 +433,128 @@ pub fn test_message() {
                 status: f1_bot_types::SessionStatus::Open,
                 created_at: std::time::UNIX_EPOCH.into(),
             }],
-        )),
-        None,
-        None,
+        ),
+        (&None, &Vec::new()),
+        (&None, &Vec::new()),
     ])
     .unwrap();
     assert_eq!(
         str,
-        r#"## testing 2025 F2 testing
+        r#"# Next Feeder Events
+## testing F2 testing
 > ~~`   testing`: <t:1735718400:F> (<t:1735718400:R>)~~
+
+Go to <id:customize> and select the [Series]-Notifications role to receive notifications for each series.
+All Times are in your timezone.
 "#
     )
+}
+
+#[derive(serde::Serialize)]
+struct Content<'a> {
+    content: &'a str,
+}
+
+impl<'a> Content<'a> {
+    pub fn new(str: &'a str) -> Self {
+        Self { content: str }
+    }
+}
+
+async fn create_event_message(
+    db_conn: &libsql::Connection,
+    http: &Http,
+    trace_id: TraceId,
+    channel: &str,
+    weekend: &f1_bot_types::Weekend,
+    sessions: &Vec<Session>,
+) -> Result<Message, Box<dyn std::error::Error>> {
+    let content = persistent_msg_f1(weekend, sessions)?;
+    let response = http
+        .execute_request(
+            trace_id,
+            http.create_message(channel)
+                .json(&Content { content: &content }),
+        )
+        .await?
+        .error_for_status()?;
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    content.hash(&mut hasher);
+    let new_hash = std::hash::Hasher::finish(&hasher).to_string();
+
+    let new_message_data: CreateMessageResponse = response.json().await?;
+    _ = db_conn.execute(
+        "INSERT INTO messages (discord_id, discord_channel, kind, series, expires_at, hash) VALUES (?, ?, ?, ?, ?, ?)", 
+        params![
+            new_message_data.id.clone(),
+            new_message_data.channel_id.clone(),
+            MessageKind::Weekend,
+            Series::F1,
+            (Utc::now() + chrono::Duration::days(100)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            new_hash.clone()
+        ]).await?;
+    let id = db_conn.last_insert_rowid();
+
+    let message = Message {
+        id: id as u64,
+        discord_id: new_message_data.id,
+        discord_channel: new_message_data.channel_id,
+        kind: f1_bot_types::MessageKind::Weekend,
+        series: Series::F1,
+        expires_at: Utc::now() + chrono::Duration::days(100),
+        created_at: Utc::now(),
+        hash: new_hash,
+    };
+
+    Ok(message)
+}
+
+async fn create_feeder_message(
+    db_conn: &libsql::Connection,
+    http: &Http,
+    trace_id: TraceId,
+    channel: &str,
+    data: [(&Option<Weekend>, &Vec<Session>); 3],
+) -> Result<Message, Box<dyn std::error::Error>> {
+    let content = persistent_msg_feeder(data)?;
+    let mut hasher = std::hash::DefaultHasher::new();
+    content.hash(&mut hasher);
+    let hash = std::hash::Hasher::finish(&hasher);
+    let expires_at = Utc::now() + chrono::Duration::days(100);
+    let res = http
+        .execute_request(
+            trace_id,
+            http.create_message(channel).json(&Content::new(&content)),
+        )
+        .await?
+        .error_for_status()?;
+    let new_message_data: CreateMessageResponse = res.json().await?;
+    let new_id = database::insert(
+        &db_conn,
+        trace_id,
+        r#"INSERT INTO messages
+    (discord_channel, discord_id, kind, series, hash, expires_at) 
+    VALUES (?, ?, ?, ?, ?, ?)"#,
+        params![
+            new_message_data.channel_id.clone(),
+            new_message_data.id.clone(),
+            MessageKind::Weekend,
+            Series::F2,
+            hash.to_string(),
+            expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ],
+    )
+    .await?;
+
+    Ok(Message {
+        id: new_id as u64,
+        discord_channel: new_message_data.channel_id,
+        discord_id: new_message_data.id,
+        kind: MessageKind::Weekend,
+        series: Series::F2,
+        hash: hash.to_string(),
+        expires_at,
+        created_at: Utc::now(),
+    })
 }
