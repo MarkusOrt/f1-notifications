@@ -1,6 +1,7 @@
 #![allow(unused)]
+use chrono::{DateTime, Utc};
 use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend, WeekendStatus};
-use libsql::params;
+use libsql::{ffi::SQLITE_IOCAP_ATOMIC8K, params};
 use sentry::{TransactionContext, protocol::TraceId};
 use serde::de::DeserializeOwned;
 
@@ -72,7 +73,7 @@ pub async fn update(
     trace_id: TraceId,
     sql: &str,
     params: impl libsql::params::IntoParams,
-) -> Result<(), libsql::Error> {
+) -> ErrResult {
     let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
     tx.set_tag("db.operation", "UPDATE");
     tx.set_extra("db.statement", sql.into());
@@ -128,7 +129,8 @@ pub async fn next_session(
         r#"SELECT * FROM sessions 
         WHERE status != ? 
         AND weekend_id = ? 
-        ORDER BY start_time ASC"#,
+        ORDER BY start_time ASC
+        LIMIT 1"#,
         params![SessionStatus::Finished, weekend_id],
     )
     .await
@@ -139,7 +141,7 @@ pub async fn update_message_hash(
     trace_id: TraceId,
     message_id: u64,
     new_hash: String,
-) -> Result<(), libsql::Error> {
+) -> ErrResult {
     self::update(
         db_conn,
         trace_id,
@@ -183,7 +185,7 @@ pub async fn insert(
     trace_id: TraceId,
     sql: &str,
     params: impl libsql::params::IntoParams,
-) -> Result<i64, libsql::Error> {
+) -> ErrResult<i64> {
     let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
     tx.set_tag("db.operation", "INSERT");
     tx.set_extra("db.statement", sql.into());
@@ -234,6 +236,57 @@ pub async fn delete_message(
         trace_id,
         "DELETE FROM messages WHERE id = ?",
         params![message_id],
+    )
+    .await
+}
+
+pub async fn mark_session_finished(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    session_id: i64,
+) -> ErrResult {
+    self::update(
+        db_conn,
+        trace_id,
+        "UPDATE sessions SET status = ? WHERE id = ?",
+        params![SessionStatus::Finished, session_id],
+    )
+    .await
+}
+
+pub async fn expired_messages(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+) -> ErrResult<Vec<Message>> {
+    self::fetch(
+        db_conn,
+        trace_id,
+        "SELECT * FROM messages WHERE strftime('%Y-%m-%dT%H:%M:%SZ', CURRENT_TIMESTAMP) > expires_at",
+        (),
+    )
+    .await
+}
+
+pub async fn new_notify_message(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    channel: String,
+    discord_id: String,
+    expiry: DateTime<Utc>,
+    series: Series,
+) -> ErrResult<i64> {
+    self::insert(
+        db_conn,
+        trace_id,
+        r#"INSERT INTO messages
+    (discord_channel, discord_id, expires_at, kind, series) VALUES (?, ?, ?, ?, ?)"#,
+        params![
+            channel,
+            discord_id,
+            expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            MessageKind::Notification,
+            series,
+        ],
     )
     .await
 }

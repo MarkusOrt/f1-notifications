@@ -2,14 +2,17 @@ use std::time::Duration;
 use std::{fmt::Write, hash::Hash};
 
 use chrono::Utc;
-use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend, WeekendStatus};
+use f1_bot_types::{
+    Message, MessageKind, Series, Session, SessionNotifySettings, SessionStatus, Weekend,
+    WeekendStatus,
+};
 use libsql::params;
 use sentry::protocol::{TraceContext, TraceId};
 use tokio::sync::broadcast::Receiver;
 use tracing::{info, warn};
 
 use crate::bot::calendar::make_calendar_message_string;
-use crate::bot::database::{get_event_message, update_message_hash};
+use crate::bot::database::{get_event_message, mark_session_finished, update_message_hash};
 use crate::bot::http::Http;
 use crate::error::ErrResult;
 
@@ -155,6 +158,41 @@ pub async fn bot_thread(
                     .error_for_status()?;
                 _ = response;
             }
+            'f1_notify: {
+                let Some(next_session) =
+                    database::next_session(&db_conn, trace_id, f1_weekend.id).await?
+                else {
+                    break 'f1_notify;
+                };
+                let time_check = Utc::now() + chrono::Duration::minutes(5);
+                if next_session.start_time > Utc::now() && next_session.start_time < time_check {
+                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    if next_session.notify == SessionNotifySettings::Ignore {
+                        break 'f1_notify;
+                    }
+                    let new_message: CreateMessageResponse = http
+                        .execute_request(
+                            trace_id,
+                            http.create_message(&f1_channel)
+                                .json(&Content::new(&next_session.name)),
+                        )
+                        .await?
+                        .error_for_status()?
+                        .json()
+                        .await?;
+
+                    database::new_notify_message(
+                        &db_conn,
+                        trace_id,
+                        new_message.channel_id,
+                        new_message.id,
+                        next_session.start_time
+                            + chrono::Duration::seconds(next_session.duration as i64),
+                        f1_weekend.series,
+                    )
+                    .await?;
+                }
+            }
         }
 
         {
@@ -220,6 +258,131 @@ pub async fn bot_thread(
                     hash.to_string(),
                 )
                 .await?
+            }
+            'f2_notify: {
+                let Some(weekend) = next_f2_weekend else {
+                    break 'f2_notify;
+                };
+                let Some(next_session) =
+                    database::next_session(&db_conn, trace_id, weekend.id).await?
+                else {
+                    break 'f2_notify;
+                };
+                let time_check = Utc::now() + chrono::Duration::minutes(5);
+                if next_session.start_time > Utc::now() && next_session.start_time < time_check {
+                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    if next_session.notify == SessionNotifySettings::Ignore {
+                        break 'f2_notify;
+                    }
+                    let new_message: CreateMessageResponse = http
+                        .execute_request(
+                            trace_id,
+                            http.create_message(&feeder_channel)
+                                .json(&Content::new("Notifications Test!")),
+                        )
+                        .await?
+                        .error_for_status()?
+                        .json()
+                        .await?;
+
+                    database::new_notify_message(
+                        &db_conn,
+                        trace_id,
+                        new_message.channel_id,
+                        new_message.id,
+                        next_session.start_time
+                            + chrono::Duration::seconds(next_session.duration as i64),
+                        weekend.series,
+                    )
+                    .await?;
+                }
+            }
+            'f3_notify: {
+                let Some(weekend) = next_f3_weekend else {
+                    break 'f3_notify;
+                };
+                let Some(next_session) =
+                    database::next_session(&db_conn, trace_id, weekend.id).await?
+                else {
+                    break 'f3_notify;
+                };
+                let time_check = Utc::now() + chrono::Duration::minutes(5);
+                if next_session.start_time > Utc::now() && next_session.start_time < time_check {
+                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    if next_session.notify == SessionNotifySettings::Ignore {
+                        break 'f3_notify;
+                    }
+                    let new_message: CreateMessageResponse = http
+                        .execute_request(
+                            trace_id,
+                            http.create_message(&feeder_channel)
+                                .json(&Content::new("Notifications Test!")),
+                        )
+                        .await?
+                        .error_for_status()?
+                        .json()
+                        .await?;
+
+                    database::new_notify_message(
+                        &db_conn,
+                        trace_id,
+                        new_message.channel_id,
+                        new_message.id,
+                        next_session.start_time
+                            + chrono::Duration::seconds(next_session.duration as i64),
+                        weekend.series,
+                    )
+                    .await?;
+                }
+            }
+            'f1a_notify: {
+                let Some(weekend) = next_f1a_weekend else {
+                    break 'f1a_notify;
+                };
+                let Some(next_session) =
+                    database::next_session(&db_conn, trace_id, weekend.id).await?
+                else {
+                    break 'f1a_notify;
+                };
+                let time_check = Utc::now() + chrono::Duration::minutes(5);
+                if next_session.start_time > Utc::now() && next_session.start_time < time_check {
+                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    if next_session.notify == SessionNotifySettings::Ignore {
+                        break 'f1a_notify;
+                    }
+                    let new_message: CreateMessageResponse = http
+                        .execute_request(
+                            trace_id,
+                            http.create_message(&feeder_channel)
+                                .json(&Content::new("Notifications Test!")),
+                        )
+                        .await?
+                        .error_for_status()?
+                        .json()
+                        .await?;
+                    database::new_notify_message(
+                        &db_conn,
+                        trace_id,
+                        new_message.channel_id,
+                        new_message.id,
+                        next_session.start_time
+                            + chrono::Duration::seconds(next_session.duration as i64),
+                        weekend.series,
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        {
+            for message in database::expired_messages(&db_conn, trace_id).await? {
+                http.execute_request(
+                    trace_id,
+                    http.delete_message(message.discord_channel, message.discord_id),
+                )
+                .await?
+                .error_for_status()?;
+                database::delete_message(&db_conn, trace_id, message.id).await?;
             }
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
