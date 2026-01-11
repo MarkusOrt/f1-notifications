@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::bot::calendar::make_calendar_message_string;
 use crate::bot::database::{get_event_message, update_message_hash};
 use crate::bot::http::Http;
+use crate::error::ErrResult;
 
 pub mod calendar;
 mod database;
@@ -35,9 +36,8 @@ pub async fn bot_thread(
     mut should_shut_down: Receiver<()>,
     http: http::Http,
     db_conn: libsql::Connection,
-) {
+) -> ErrResult {
     info!("Bot thread starting.");
-    #[allow(unused)]
     loop {
         let trace_id = TraceContext::default().trace_id;
 
@@ -45,28 +45,25 @@ pub async fn bot_thread(
             break;
         }
 
-        let f1_channel = std::env::var("F1_CHANNEL").expect("F1 Channel not set");
-        let feeder_channel = std::env::var("FEEDER_CHANNEL").expect("Feeder Channel not set");
+        let f1_channel = std::env::var("F1_CHANNEL")?;
+        let feeder_channel = std::env::var("FEEDER_CHANNEL")?;
 
         'calendar: {
-            let calendar_messages = database::get_calendar_messages(&db_conn, trace_id, Series::F1)
-                .await
-                .unwrap();
+            let calendar_messages =
+                database::get_calendar_messages(&db_conn, trace_id, Series::F1).await?;
             if calendar_messages.len() < 5 {
                 warn!("Skipping Calendar due to insufficient messages (less than 6)!");
                 break 'calendar;
             }
-            let weekends = database::weekends_for_series(&db_conn, trace_id, Series::F1)
-                .await
-                .unwrap();
-            let sessions = database::all_sessions(&db_conn, trace_id).await.unwrap();
+            let weekends = database::weekends_for_series(&db_conn, trace_id, Series::F1).await?;
+            let sessions = database::all_sessions(&db_conn, trace_id).await?;
 
             for (i, message) in calendar_messages.iter().enumerate() {
-                let message_string = make_calendar_message_string(&weekends, &sessions, i).unwrap();
+                let message_string = make_calendar_message_string(&weekends, &sessions, i)?;
                 let mut hasher = std::hash::DefaultHasher::new();
                 message_string.hash(&mut hasher);
                 let new_hash = std::hash::Hasher::finish(&hasher);
-                let hash: u64 = message.hash.parse().unwrap();
+                let hash: u64 = message.hash.parse()?;
                 if hash == new_hash {
                     continue;
                 }
@@ -80,53 +77,41 @@ pub async fn bot_thread(
                         content: &message_string,
                     });
 
-                let res = http.execute_request(trace_id, req).await.unwrap();
+                let res = http.execute_request(trace_id, req).await?;
                 _ = res;
 
-                update_message_hash(&db_conn, trace_id, message.id, new_hash.to_string())
-                    .await
-                    .unwrap();
+                update_message_hash(&db_conn, trace_id, message.id, new_hash.to_string()).await?;
             }
         }
 
         'f1_persistent: {
-            let Some(f1_weekend) = database::next_weekend(&db_conn, trace_id, Series::F1)
-                .await
-                .unwrap()
+            let Some(f1_weekend) = database::next_weekend(&db_conn, trace_id, Series::F1).await?
             else {
                 break 'f1_persistent;
             };
-            let sessions_for_f1 = database::sessions_for_weekend(&db_conn, trace_id, f1_weekend.id)
-                .await
-                .unwrap();
-            let event_message = match database::get_event_message(&db_conn, trace_id, Series::F1)
-                .await
-                .unwrap()
-            {
-                Some(msg) => msg,
-                None => create_event_message(
-                    &db_conn,
-                    &http,
-                    trace_id,
-                    &f1_channel,
-                    &f1_weekend,
-                    &sessions_for_f1,
-                )
-                .await
-                .unwrap(),
-            };
-            let mut weekend_done = true;
-            // Do not skip empty weekends because sessions might not have been populated yet!
-            if sessions_for_f1.is_empty() {
-                weekend_done = false;
-            }
-            for session in sessions_for_f1.iter() {
-                if session.status == SessionStatus::Open {
-                    weekend_done = false;
-                }
-            }
+            let sessions_for_f1 =
+                database::sessions_for_weekend(&db_conn, trace_id, f1_weekend.id).await?;
+            let event_message =
+                match database::get_event_message(&db_conn, trace_id, Series::F1).await? {
+                    Some(msg) => msg,
+                    None => {
+                        create_event_message(
+                            &db_conn,
+                            &http,
+                            trace_id,
+                            &f1_channel,
+                            &f1_weekend,
+                            &sessions_for_f1,
+                        )
+                        .await?
+                    }
+                };
 
-            if weekend_done {
+            if !(sessions_for_f1.is_empty()
+                || sessions_for_f1
+                    .iter()
+                    .any(|f| f.status == SessionStatus::Open))
+            {
                 let res = http
                     .execute_request(
                         trace_id,
@@ -135,26 +120,21 @@ pub async fn bot_thread(
                             &event_message.discord_id,
                         ),
                     )
-                    .await
-                    .unwrap()
-                    .error_for_status()
-                    .unwrap();
+                    .await?
+                    .error_for_status()?;
 
                 _ = res;
-                database::delete_message(&db_conn, trace_id, event_message.id)
-                    .await
-                    .unwrap();
+                database::delete_message(&db_conn, trace_id, event_message.id).await?;
                 database::update(
                     &db_conn,
                     trace_id,
                     "UPDATE weekends SET status = ? WHERE id = ?",
                     params![WeekendStatus::Done, f1_weekend.id],
                 )
-                .await
-                .unwrap();
+                .await?;
             }
 
-            let db_hash: u64 = event_message.hash.parse().unwrap();
+            let db_hash: u64 = event_message.hash.parse()?;
             let message_content = persistent_msg_f1(&f1_weekend, &sessions_for_f1).unwrap();
             let mut hasher = std::hash::DefaultHasher::new();
             message_content.hash(&mut hasher);
@@ -171,67 +151,51 @@ pub async fn bot_thread(
                             content: &message_content,
                         }),
                     )
-                    .await
-                    .unwrap()
-                    .error_for_status()
-                    .unwrap();
+                    .await?
+                    .error_for_status()?;
                 _ = response;
             }
         }
 
         {
-            let next_f2_weekend = database::next_weekend(&db_conn, trace_id, Series::F2)
-                .await
-                .unwrap();
-            let next_f3_weekend = database::next_weekend(&db_conn, trace_id, Series::F3)
-                .await
-                .unwrap();
-            let next_f1a_weekend = database::next_weekend(&db_conn, trace_id, Series::F1Academy)
-                .await
-                .unwrap();
+            let next_f2_weekend = database::next_weekend(&db_conn, trace_id, Series::F2).await?;
+            let next_f3_weekend = database::next_weekend(&db_conn, trace_id, Series::F3).await?;
+            let next_f1a_weekend =
+                database::next_weekend(&db_conn, trace_id, Series::F1Academy).await?;
             let f2_sessions = match &next_f2_weekend {
-                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id)
-                    .await
-                    .unwrap(),
+                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id).await?,
                 None => Vec::new(),
             };
             let f3_sessions = match &next_f3_weekend {
-                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id)
-                    .await
-                    .unwrap(),
+                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id).await?,
                 None => Vec::new(),
             };
             let f1a_sessions = match &next_f1a_weekend {
-                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id)
-                    .await
-                    .unwrap(),
+                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id).await?,
                 None => Vec::new(),
             };
-            let weekends_message = match get_event_message(&db_conn, trace_id, Series::F2)
-                .await
-                .unwrap()
-            {
+            let weekends_message = match get_event_message(&db_conn, trace_id, Series::F2).await? {
                 Some(m) => m,
-                None => create_feeder_message(
-                    &db_conn,
-                    &http,
-                    trace_id,
-                    &feeder_channel,
-                    [
-                        (&next_f2_weekend, &f2_sessions),
-                        (&next_f3_weekend, &f3_sessions),
-                        (&next_f1a_weekend, &f1a_sessions),
-                    ],
-                )
-                .await
-                .unwrap(),
+                None => {
+                    create_feeder_message(
+                        &db_conn,
+                        &http,
+                        trace_id,
+                        &feeder_channel,
+                        [
+                            (&next_f2_weekend, &f2_sessions),
+                            (&next_f3_weekend, &f3_sessions),
+                            (&next_f1a_weekend, &f1a_sessions),
+                        ],
+                    )
+                    .await?
+                }
             };
             let message_content = persistent_msg_feeder([
                 (&next_f2_weekend, &f2_sessions),
                 (&next_f3_weekend, &f3_sessions),
                 (&next_f1a_weekend, &f1a_sessions),
-            ])
-            .unwrap();
+            ])?;
             let mut hasher = std::hash::DefaultHasher::new();
             message_content.hash(&mut hasher);
             let hash = std::hash::Hasher::finish(&hasher);
@@ -246,10 +210,8 @@ pub async fn bot_thread(
                         )
                         .json(&Content::new(&message_content)),
                     )
-                    .await
-                    .unwrap()
-                    .error_for_status()
-                    .unwrap();
+                    .await?
+                    .error_for_status()?;
                 _ = res;
                 database::update_message_hash(
                     &db_conn,
@@ -257,14 +219,14 @@ pub async fn bot_thread(
                     weekends_message.id,
                     hash.to_string(),
                 )
-                .await
-                .unwrap();
+                .await?
             }
         }
 
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
     info!("Bot Thread shutdown");
+    Ok(())
 }
 
 /// Creates the Message String for the F1 Persistent current event message.
@@ -477,7 +439,7 @@ async fn create_event_message(
     channel: &str,
     weekend: &f1_bot_types::Weekend,
     sessions: &Vec<Session>,
-) -> Result<Message, Box<dyn std::error::Error>> {
+) -> ErrResult<Message> {
     let content = persistent_msg_f1(weekend, sessions)?;
     let response = http
         .execute_request(
@@ -525,7 +487,7 @@ async fn create_feeder_message(
     trace_id: TraceId,
     channel: &str,
     data: [(&Option<Weekend>, &Vec<Session>); 3],
-) -> Result<Message, Box<dyn std::error::Error>> {
+) -> ErrResult<Message> {
     let content = persistent_msg_feeder(data)?;
     let mut hasher = std::hash::DefaultHasher::new();
     content.hash(&mut hasher);

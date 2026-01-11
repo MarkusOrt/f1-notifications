@@ -12,6 +12,7 @@ use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 use crate::{bot::bot_thread, http::http_api};
 
 pub mod bot;
+mod error;
 mod http;
 
 #[derive(Debug, Serialize_repr, Deserialize_repr)]
@@ -148,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let http = crate::bot::http::Http::new(&data.bot_token);
 
-    tokio::runtime::Builder::new_multi_thread()
+    if let Err(why) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
@@ -156,27 +157,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
             let sd1 = shutdown_rx.resubscribe();
 
-            let db_client = libsql::Builder::new_local("database/db")
-                .build()
-                .await
-                .unwrap();
-            let c1 = db_client.connect().unwrap();
-            let c2 = db_client.connect().unwrap();
+            let db_client = libsql::Builder::new_local("database/db").build().await?;
+            let c1 = db_client.connect()?;
+            let c2 = db_client.connect()?;
 
             let http_bot = http.clone();
 
             let bot_thread = tokio::spawn(async move { bot_thread(sd1, http_bot, c1).await });
 
             let http_thread =
-                tokio::spawn(async move { http_api(shutdown_rx, http, data, c2).await.unwrap() });
+                tokio::spawn(async move { http_api(shutdown_rx, http, data, c2).await });
 
-            tokio::signal::ctrl_c().await.unwrap();
+            tokio::signal::ctrl_c().await?;
             info!("Shutdown signal received");
-            shutdown_tx.send(()).unwrap();
+            shutdown_tx.send(())?;
 
-            bot_thread.await.unwrap();
-            http_thread.await.unwrap();
-        });
+            if let Err(why) = bot_thread.await? {
+                sentry::capture_error(&why);
+            }
+
+            if let Err(why) = http_thread.await? {
+                sentry::capture_error(&why);
+            }
+
+            Ok::<(), crate::error::Error>(())
+        })
+    {
+        sentry::capture_error(&why);
+    }
     sentry::end_session_with_status(sentry::protocol::SessionStatus::Ok);
     if let Some(client) = sentry::Hub::current().client() {
         client.close(Some(std::time::Duration::from_secs(2)));

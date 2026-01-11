@@ -4,11 +4,13 @@ use libsql::params;
 use sentry::{TransactionContext, protocol::TraceId};
 use serde::de::DeserializeOwned;
 
+use crate::error::ErrResult;
+
 pub async fn weekends_for_series(
     db_conn: &libsql::Connection,
     trace_id: TraceId,
     series: Series,
-) -> Result<Vec<Weekend>, libsql::Error> {
+) -> ErrResult<Vec<Weekend>> {
     self::fetch(
         db_conn,
         trace_id,
@@ -24,7 +26,7 @@ pub async fn fetch<T: DeserializeOwned + Sized>(
     trace_id: TraceId,
     sql: &str,
     params: impl libsql::params::IntoParams,
-) -> Result<Vec<T>, libsql::Error> {
+) -> ErrResult<Vec<T>> {
     let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
     tx.set_tag("db.operation", "SELECT");
     tx.set_extra("db.statement", sql.into());
@@ -32,7 +34,7 @@ pub async fn fetch<T: DeserializeOwned + Sized>(
     let mut cursor = db_conn.query(sql, params).await?;
     let mut return_value: Vec<T> = Vec::new();
     while let Ok(Some(row)) = cursor.next().await {
-        return_value.push(libsql::de::from_row(&row).unwrap());
+        return_value.push(libsql::de::from_row(&row)?);
     }
     tx.set_data("rows_returned", return_value.len().into());
     tx.set_status(sentry::protocol::SpanStatus::Ok);
@@ -45,7 +47,7 @@ pub async fn fetch_optional<T: DeserializeOwned + Sized>(
     trace_id: TraceId,
     sql: &str,
     params: impl libsql::params::IntoParams,
-) -> Result<Option<T>, libsql::Error> {
+) -> ErrResult<Option<T>> {
     let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
     tx.set_tag("db.operation", "SELECT");
     tx.set_extra("db.statement", sql.into());
@@ -56,7 +58,7 @@ pub async fn fetch_optional<T: DeserializeOwned + Sized>(
         tx.set_data("rows_returned", 1.into());
         tx.set_status(sentry::protocol::SpanStatus::Ok);
         tx.finish();
-        Ok(Some(libsql::de::from_row(&row).unwrap()))
+        Ok(Some(libsql::de::from_row(&row)?))
     } else {
         tx.set_data("rows_returned", 0.into());
         tx.set_status(sentry::protocol::SpanStatus::Ok);
@@ -85,7 +87,7 @@ pub async fn next_weekend(
     db_conn: &libsql::Connection,
     trace_id: TraceId,
     series: Series,
-) -> Result<Option<Weekend>, libsql::Error> {
+) -> ErrResult<Option<Weekend>> {
     self::fetch_optional(
         db_conn,
         trace_id,
@@ -103,7 +105,7 @@ pub async fn sessions_for_weekend(
     db_conn: &libsql::Connection,
     trace_id: TraceId,
     weekend_id: u64,
-) -> Result<Vec<Session>, libsql::Error> {
+) -> ErrResult<Vec<Session>> {
     self::fetch(
         db_conn,
         trace_id,
@@ -143,7 +145,7 @@ pub async fn get_calendar_messages(
     db_conn: &libsql::Connection,
     trace_id: TraceId,
     series: Series,
-) -> Result<Vec<Message>, libsql::Error> {
+) -> ErrResult<Vec<Message>> {
     self::fetch(
         db_conn,
         trace_id,
@@ -158,7 +160,7 @@ pub async fn get_calendar_messages(
 pub async fn all_sessions(
     db_conn: &libsql::Connection,
     trace_id: TraceId,
-) -> Result<Vec<Session>, libsql::Error> {
+) -> ErrResult<Vec<Session>> {
     self::fetch(
         db_conn,
         trace_id,
@@ -188,7 +190,7 @@ pub async fn get_event_message(
     db_conn: &libsql::Connection,
     trace_id: TraceId,
     series: Series,
-) -> Result<Option<Message>, libsql::Error> {
+) -> ErrResult<Option<Message>> {
     fetch_optional(
         db_conn,
         trace_id,

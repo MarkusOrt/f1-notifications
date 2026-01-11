@@ -1,4 +1,4 @@
-use crate::{Interaction, InteractionReceive, http::message::Flags};
+use crate::{Interaction, InteractionReceive, error::ErrResult, http::message::Flags};
 use axum::{
     body::Body,
     extract::State,
@@ -26,7 +26,7 @@ pub async fn http_api(
     http: crate::bot::http::Http,
     data: crate::RequiredData,
     db_conn: libsql::Connection,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> ErrResult {
     _ = db_conn;
     let mut public_key = [0u8; 32];
     hex::decode_to_slice(data.public_key, &mut public_key)?;
