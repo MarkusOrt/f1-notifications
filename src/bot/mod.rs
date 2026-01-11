@@ -135,7 +135,7 @@ pub async fn bot_thread(
             }
 
             let db_hash: u64 = event_message.hash.parse()?;
-            let message_content = persistent_msg_f1(&f1_weekend, &sessions_for_f1).unwrap();
+            let message_content = persistent_msg_f1(&f1_weekend, &sessions_for_f1)?;
             let mut hasher = std::hash::DefaultHasher::new();
             message_content.hash(&mut hasher);
             let hash = std::hash::Hasher::finish(&hasher);

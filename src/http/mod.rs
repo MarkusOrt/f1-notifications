@@ -58,10 +58,12 @@ pub async fn http_api(
 }
 
 async fn fallback() -> (StatusCode, &'static str) {
+    sentry::configure_scope(|f| f.set_tag("http.status_code", 404));
     (StatusCode::NOT_FOUND, "Not Found.")
 }
 
 async fn health() -> StatusCode {
+    sentry::configure_scope(|f| f.set_tag("http.status_code", 200));
     StatusCode::OK
 }
 
@@ -99,10 +101,17 @@ async fn interaction(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
+    let trace_id = sentry::Hub::current().configure_scope(|f| {
+        f.get_span()
+            .map(|f| f.get_trace_context().trace_id)
+            .unwrap_or_default()
+    });
+
     let (Some(signature), Some(timestamp)) = (
         headers.get("X-Signature-Ed25519"),
         headers.get("X-Signature-Timestamp"),
     ) else {
+        sentry::configure_scope(|f| f.set_tag("http.status_code", 401));
         return (
             StatusCode::UNAUTHORIZED,
             HeaderMap::new(),
@@ -111,6 +120,7 @@ async fn interaction(
     };
 
     let (Ok(signature), Ok(timestamp)) = (signature.to_str(), timestamp.to_str()) else {
+        sentry::configure_scope(|f| f.set_tag("http.status_code", 401));
         return (
             StatusCode::UNAUTHORIZED,
             HeaderMap::new(),
@@ -124,8 +134,12 @@ async fn interaction(
     let mut message = String::with_capacity(timestamp.len() + body.len());
     message.write_str(timestamp).unwrap();
     message.write_str(&body).unwrap();
-    if let Err(why) = state.public_key.verify_strict(message.as_bytes(), &sign) {
-        info!("{why}");
+    if state
+        .public_key
+        .verify_strict(message.as_bytes(), &sign)
+        .is_err()
+    {
+        sentry::configure_scope(|f| f.set_tag("http.status_code", 401));
         return (
             StatusCode::UNAUTHORIZED,
             HeaderMap::new(),
@@ -134,23 +148,29 @@ async fn interaction(
     }
 
     let serialized_body: InteractionReceive = serde_json::from_str(&body).unwrap();
-    println!("{serialized_body:#?}");
     match serialized_body.kind {
         Interaction::Ping => {
             let response = serde_json::to_string(&DiscordResponse { kind: 1 }).unwrap();
             let mut headers = HeaderMap::new();
             headers.append(CONTENT_TYPE, "application/json".parse().unwrap());
 
+            sentry::configure_scope(|f| f.set_tag("http.status_code", 200));
             (StatusCode::OK, headers, response)
         }
         _ => {
             _ = state
                 .http
-                .interaction_response(serialized_body.id, serialized_body.token)
-                .json(&InterResponse::TESTING_RESPONSE)
-                .send()
+                .execute_request(
+                    trace_id,
+                    state
+                        .http
+                        .interaction_response(serialized_body.id, serialized_body.token)
+                        .json(&InterResponse::TESTING_RESPONSE),
+                )
                 .await
                 .unwrap();
+
+            sentry::configure_scope(|f| f.set_tag("http.status_code", 202));
             (
                 StatusCode::ACCEPTED,
                 HeaderMap::new(),
