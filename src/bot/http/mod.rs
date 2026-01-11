@@ -1,10 +1,7 @@
 #![allow(dead_code)]
 //! HTTP Client Handler
 
-use std::{
-    fmt::Display,
-    time::Duration,
-};
+use std::{fmt::Display, time::Duration};
 
 use axum::http::HeaderMap;
 use reqwest::{RequestBuilder, Response, header::AUTHORIZATION};

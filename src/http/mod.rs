@@ -4,7 +4,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, Request},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use reqwest::{StatusCode, header::CONTENT_TYPE};
@@ -27,12 +27,14 @@ pub async fn http_api(
     data: crate::RequiredData,
     db_conn: libsql::Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    _ = db_conn;
     let mut public_key = [0u8; 32];
     hex::decode_to_slice(data.public_key, &mut public_key)?;
     let vk = Box::leak(Box::new(VerifyingKey::from_bytes(&public_key)?));
 
     let router = axum::Router::new()
         .route("/interaction", post(interaction))
+        .route("/health", get(health))
         .with_state(AxumState {
             public_key: vk,
             http,
@@ -57,6 +59,10 @@ pub async fn http_api(
 
 async fn fallback() -> (StatusCode, &'static str) {
     (StatusCode::NOT_FOUND, "Not Found.")
+}
+
+async fn health() -> StatusCode {
+    StatusCode::OK
 }
 
 #[derive(serde::Serialize)]

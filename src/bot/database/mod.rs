@@ -65,6 +65,22 @@ pub async fn fetch_optional<T: DeserializeOwned + Sized>(
     }
 }
 
+pub async fn update(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<(), libsql::Error> {
+    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
+    tx.set_tag("db.operation", "UPDATE");
+    tx.set_extra("db.statement", sql.into());
+    let res = db_conn.execute(sql, params).await?;
+    tx.set_tag("rows_affected", res);
+    tx.set_status(sentry::protocol::SpanStatus::Ok);
+    tx.finish();
+    Ok(())
+}
+
 pub async fn next_weekend(
     db_conn: &libsql::Connection,
     trace_id: TraceId,
@@ -110,16 +126,17 @@ pub async fn next_session(
 
 pub async fn update_message_hash(
     db_conn: &libsql::Connection,
+    trace_id: TraceId,
     message_id: u64,
     new_hash: String,
 ) -> Result<(), libsql::Error> {
-    _ = db_conn
-        .execute(
-            "UPDATE messages SET hash = ? WHERE id = ?",
-            params![new_hash, message_id],
-        )
-        .await?;
-    Ok(())
+    self::update(
+        db_conn,
+        trace_id,
+        "UPDATE messages SET hash = ? WHERE id = ?",
+        params![new_hash, message_id],
+    )
+    .await
 }
 
 pub async fn get_calendar_messages(
@@ -162,6 +179,8 @@ pub async fn insert(
     tx.set_extra("db.statement", sql.into());
     let res = db_conn.execute(sql, params).await?;
     tx.set_tag("rows_affected", res);
+    tx.set_status(sentry::protocol::SpanStatus::Ok);
+    tx.finish();
     Ok(db_conn.last_insert_rowid())
 }
 
@@ -179,12 +198,32 @@ pub async fn get_event_message(
     .await
 }
 
+pub async fn delete(
+    db_conn: &libsql::Connection,
+    trace_id: TraceId,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<(), libsql::Error> {
+    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
+    tx.set_tag("db.operation", "DELETE");
+    tx.set_extra("db.statement", sql.into());
+    let res = db_conn.execute(sql, params).await?;
+    tx.set_tag("rows_affected", res);
+    tx.set_status(sentry::protocol::SpanStatus::Ok);
+    tx.finish();
+    Ok(())
+}
+
 pub async fn delete_message(
     db_conn: &libsql::Connection,
+    trace_id: TraceId,
     message_id: u64,
 ) -> Result<(), libsql::Error> {
-    db_conn
-        .execute("DELETE FROM messages WHERE id = ?", params![message_id])
-        .await?;
-    Ok(())
+    self::delete(
+        db_conn,
+        trace_id,
+        "DELETE FROM messages WHERE id = ?",
+        params![message_id],
+    )
+    .await
 }

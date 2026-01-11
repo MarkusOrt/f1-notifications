@@ -2,7 +2,7 @@ use std::time::Duration;
 use std::{fmt::Write, hash::Hash};
 
 use chrono::Utc;
-use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend};
+use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend, WeekendStatus};
 use libsql::params;
 use sentry::protocol::{TraceContext, TraceId};
 use tokio::sync::broadcast::Receiver;
@@ -71,7 +71,7 @@ pub async fn bot_thread(
                     continue;
                 }
 
-                if message_string.len() == 0 {
+                if message_string.is_empty() {
                     continue;
                 }
                 let req = http
@@ -83,18 +83,18 @@ pub async fn bot_thread(
                 let res = http.execute_request(trace_id, req).await.unwrap();
                 _ = res;
 
-                update_message_hash(&db_conn, message.id, new_hash.to_string())
+                update_message_hash(&db_conn, trace_id, message.id, new_hash.to_string())
                     .await
                     .unwrap();
             }
         }
 
-        {
+        'f1_persistent: {
             let Some(f1_weekend) = database::next_weekend(&db_conn, trace_id, Series::F1)
                 .await
                 .unwrap()
             else {
-                continue;
+                break 'f1_persistent;
             };
             let sessions_for_f1 = database::sessions_for_weekend(&db_conn, trace_id, f1_weekend.id)
                 .await
@@ -117,7 +117,7 @@ pub async fn bot_thread(
             };
             let mut weekend_done = true;
             // Do not skip empty weekends because sessions might not have been populated yet!
-            if sessions_for_f1.len() == 0 {
+            if sessions_for_f1.is_empty() {
                 weekend_done = false;
             }
             for session in sessions_for_f1.iter() {
@@ -131,8 +131,8 @@ pub async fn bot_thread(
                     .execute_request(
                         trace_id,
                         http.delete_message(
-                            event_message.discord_channel,
-                            event_message.discord_id,
+                            &event_message.discord_channel,
+                            &event_message.discord_id,
                         ),
                     )
                     .await
@@ -141,11 +141,17 @@ pub async fn bot_thread(
                     .unwrap();
 
                 _ = res;
-                database::delete_message(&db_conn, event_message.id)
+                database::delete_message(&db_conn, trace_id, event_message.id)
                     .await
                     .unwrap();
-
-                continue;
+                database::update(
+                    &db_conn,
+                    trace_id,
+                    "UPDATE weekends SET status = ? WHERE id = ?",
+                    params![WeekendStatus::Done, f1_weekend.id],
+                )
+                .await
+                .unwrap();
             }
 
             let db_hash: u64 = event_message.hash.parse().unwrap();
@@ -245,9 +251,14 @@ pub async fn bot_thread(
                     .error_for_status()
                     .unwrap();
                 _ = res;
-                database::update_message_hash(&db_conn, weekends_message.id, hash.to_string())
-                    .await
-                    .unwrap();
+                database::update_message_hash(
+                    &db_conn,
+                    trace_id,
+                    weekends_message.id,
+                    hash.to_string(),
+                )
+                .await
+                .unwrap();
             }
         }
 
@@ -264,11 +275,7 @@ pub fn persistent_msg_f1(
     sessions: &Vec<Session>,
 ) -> Result<String, std::fmt::Error> {
     let mut str = String::new();
-    writeln!(
-        &mut str,
-        "## {} {}",
-        weekend.icon, weekend.name
-    )?;
+    writeln!(&mut str, "## {} {}", weekend.icon, weekend.name)?;
     let now = Utc::now();
     for session in sessions {
         let tz = session.start_time.timestamp();
@@ -298,7 +305,6 @@ pub fn persistent_msg_f1(
 
 /// Creates the Persistent next-event message for Feeder Series (F2, F3, F1A)
 /// this one will be a single message for all three series.
-#[allow(unused)]
 pub fn persistent_msg_feeder(
     data: [(&Option<Weekend>, &Vec<Session>); 3],
 ) -> Result<String, std::fmt::Error> {
@@ -311,6 +317,9 @@ pub fn persistent_msg_feeder(
             "## {} {} {}",
             weekend.icon, weekend.series, weekend.name
         )?;
+        if sessions.is_empty() {
+            writeln!(&mut str, "> :hourglass: Times are TBC")?;
+        }
         let now = Utc::now();
         for session in sessions {
             let tz = session.start_time.timestamp();
@@ -531,7 +540,7 @@ async fn create_feeder_message(
         .error_for_status()?;
     let new_message_data: CreateMessageResponse = res.json().await?;
     let new_id = database::insert(
-        &db_conn,
+        db_conn,
         trace_id,
         r#"INSERT INTO messages
     (discord_channel, discord_id, kind, series, hash, expires_at) 

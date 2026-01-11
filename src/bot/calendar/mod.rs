@@ -4,8 +4,8 @@ use chrono::{Datelike, Utc};
 use f1_bot_types::{Session, Weekend};
 
 pub fn make_calendar_message_string(
-    weekends: &Vec<Weekend>,
-    sessions: &Vec<Session>,
+    weekends: &[Weekend],
+    sessions: &[Session],
     num: usize,
 ) -> Result<String, std::fmt::Error> {
     let chunk_size = 5;
@@ -40,9 +40,9 @@ pub fn message_calendar(
     sessions: &Vec<&Session>,
     str: &mut String,
 ) -> Result<(), std::fmt::Error> {
-    writeln!(str, "## {} {} {}", weekend.icon, weekend.year, weekend.name)?;
+    writeln!(str, "## {} {}", weekend.icon, weekend.name)?;
     let now = Utc::now();
-    for session in sessions.into_iter().map(|f| *f) {
+    for session in sessions {
         let tz = session.start_time.timestamp();
         let dur = chrono::Duration::seconds(session.duration.into());
         if session.start_time + dur < now {
@@ -55,6 +55,5 @@ pub fn message_calendar(
             writeln!(str, "> `{0:>10}`: <t:{1}:F> (<t:{1}:R>)", session.name, tz)?;
         }
     }
-    writeln!(str, "\n")?;
     Ok(())
 }
