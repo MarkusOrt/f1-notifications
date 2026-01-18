@@ -1,3 +1,4 @@
+use std::os::windows::fs::MetadataExt;
 use std::time::Duration;
 use std::{fmt::Write, hash::Hash};
 
@@ -7,7 +8,8 @@ use f1_bot_types::{
     WeekendStatus,
 };
 use libsql::params;
-use sentry::protocol::{TraceContext, TraceId};
+use sentry::TransactionContext;
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast::Receiver;
 use tracing::{info, warn};
 
@@ -35,15 +37,24 @@ struct CreateMessageResponse {
     channel_id: String,
 }
 
+pub async fn load_video(path: &str) -> ErrResult<Vec<u8>> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let meta = file.metadata().await?;
+    let mut vec = Vec::with_capacity(meta.file_size() as usize);
+    file.read_to_end(&mut vec).await?;
+    Ok(vec)
+}
+
 pub async fn bot_thread(
     mut should_shut_down: Receiver<()>,
     http: http::Http,
     db_conn: libsql::Connection,
 ) -> ErrResult {
+    let _video = load_video("data/cats.mp4").await?;
     info!("Bot thread starting.");
     loop {
-        let trace_id = TraceContext::default().trace_id;
-
+        sentry::start_session();
+        let tx = sentry::start_transaction(TransactionContext::new("Main Loop", "scheduled.task"));
         if should_shut_down.try_recv().is_ok() {
             break;
         }
@@ -53,13 +64,13 @@ pub async fn bot_thread(
 
         'calendar: {
             let calendar_messages =
-                database::get_calendar_messages(&db_conn, trace_id, Series::F1).await?;
+                database::get_calendar_messages(&db_conn, &tx, Series::F1).await?;
             if calendar_messages.len() < 5 {
                 warn!("Skipping Calendar due to insufficient messages (less than 6)!");
                 break 'calendar;
             }
-            let weekends = database::weekends_for_series(&db_conn, trace_id, Series::F1).await?;
-            let sessions = database::all_sessions(&db_conn, trace_id).await?;
+            let weekends = database::weekends_for_series(&db_conn, &tx, Series::F1).await?;
+            let sessions = database::all_sessions(&db_conn, &tx).await?;
 
             for (i, message) in calendar_messages.iter().enumerate() {
                 let message_string = make_calendar_message_string(&weekends, &sessions, i)?;
@@ -80,35 +91,34 @@ pub async fn bot_thread(
                         content: &message_string,
                     });
 
-                let res = http.execute_request(trace_id, req).await?;
+                let res = http.execute_request(&tx, req).await?;
                 _ = res;
 
-                update_message_hash(&db_conn, trace_id, message.id, new_hash.to_string()).await?;
+                update_message_hash(&db_conn, &tx, message.id, new_hash.to_string()).await?;
             }
         }
 
         'f1_persistent: {
-            let Some(f1_weekend) = database::next_weekend(&db_conn, trace_id, Series::F1).await?
-            else {
+            let Some(f1_weekend) = database::next_weekend(&db_conn, &tx, Series::F1).await? else {
                 break 'f1_persistent;
             };
             let sessions_for_f1 =
-                database::sessions_for_weekend(&db_conn, trace_id, f1_weekend.id).await?;
-            let event_message =
-                match database::get_event_message(&db_conn, trace_id, Series::F1).await? {
-                    Some(msg) => msg,
-                    None => {
-                        create_event_message(
-                            &db_conn,
-                            &http,
-                            trace_id,
-                            &f1_channel,
-                            &f1_weekend,
-                            &sessions_for_f1,
-                        )
-                        .await?
-                    }
-                };
+                database::sessions_for_weekend(&db_conn, &tx, f1_weekend.id).await?;
+            let event_message = match database::get_event_message(&db_conn, &tx, Series::F1).await?
+            {
+                Some(msg) => msg,
+                None => {
+                    create_event_message(
+                        &db_conn,
+                        &http,
+                        &tx,
+                        &f1_channel,
+                        &f1_weekend,
+                        &sessions_for_f1,
+                    )
+                    .await?
+                }
+            };
 
             if !(sessions_for_f1.is_empty()
                 || sessions_for_f1
@@ -117,7 +127,7 @@ pub async fn bot_thread(
             {
                 let res = http
                     .execute_request(
-                        trace_id,
+                        &tx,
                         http.delete_message(
                             &event_message.discord_channel,
                             &event_message.discord_id,
@@ -127,10 +137,10 @@ pub async fn bot_thread(
                     .error_for_status()?;
 
                 _ = res;
-                database::delete_message(&db_conn, trace_id, event_message.id).await?;
+                database::delete_message(&db_conn, &tx, event_message.id).await?;
                 database::update(
                     &db_conn,
-                    trace_id,
+                    &tx,
                     "UPDATE weekends SET status = ? WHERE id = ?",
                     params![WeekendStatus::Done, f1_weekend.id],
                 )
@@ -145,7 +155,7 @@ pub async fn bot_thread(
             if hash != db_hash {
                 let response = http
                     .execute_request(
-                        trace_id,
+                        &tx,
                         http.edit_message(
                             &event_message.discord_channel,
                             &event_message.discord_id,
@@ -160,19 +170,19 @@ pub async fn bot_thread(
             }
             'f1_notify: {
                 let Some(next_session) =
-                    database::next_session(&db_conn, trace_id, f1_weekend.id).await?
+                    database::next_session(&db_conn, &tx, f1_weekend.id).await?
                 else {
                     break 'f1_notify;
                 };
                 let time_check = Utc::now() + chrono::Duration::minutes(5);
                 if next_session.start_time > Utc::now() && next_session.start_time < time_check {
-                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    mark_session_finished(&db_conn, &tx, next_session.id).await?;
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f1_notify;
                     }
                     let new_message: CreateMessageResponse = http
                         .execute_request(
-                            trace_id,
+                            &tx,
                             http.create_message(&f1_channel)
                                 .json(&Content::new(&next_session.name)),
                         )
@@ -183,7 +193,7 @@ pub async fn bot_thread(
 
                     database::new_notify_message(
                         &db_conn,
-                        trace_id,
+                        &tx,
                         new_message.channel_id,
                         new_message.id,
                         next_session.start_time
@@ -196,29 +206,28 @@ pub async fn bot_thread(
         }
 
         {
-            let next_f2_weekend = database::next_weekend(&db_conn, trace_id, Series::F2).await?;
-            let next_f3_weekend = database::next_weekend(&db_conn, trace_id, Series::F3).await?;
-            let next_f1a_weekend =
-                database::next_weekend(&db_conn, trace_id, Series::F1Academy).await?;
+            let next_f2_weekend = database::next_weekend(&db_conn, &tx, Series::F2).await?;
+            let next_f3_weekend = database::next_weekend(&db_conn, &tx, Series::F3).await?;
+            let next_f1a_weekend = database::next_weekend(&db_conn, &tx, Series::F1Academy).await?;
             let f2_sessions = match &next_f2_weekend {
-                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id).await?,
+                Some(w) => database::sessions_for_weekend(&db_conn, &tx, w.id).await?,
                 None => Vec::new(),
             };
             let f3_sessions = match &next_f3_weekend {
-                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id).await?,
+                Some(w) => database::sessions_for_weekend(&db_conn, &tx, w.id).await?,
                 None => Vec::new(),
             };
             let f1a_sessions = match &next_f1a_weekend {
-                Some(w) => database::sessions_for_weekend(&db_conn, trace_id, w.id).await?,
+                Some(w) => database::sessions_for_weekend(&db_conn, &tx, w.id).await?,
                 None => Vec::new(),
             };
-            let weekends_message = match get_event_message(&db_conn, trace_id, Series::F2).await? {
+            let weekends_message = match get_event_message(&db_conn, &tx, Series::F2).await? {
                 Some(m) => m,
                 None => {
                     create_feeder_message(
                         &db_conn,
                         &http,
-                        trace_id,
+                        &tx,
                         &feeder_channel,
                         [
                             (&next_f2_weekend, &f2_sessions),
@@ -241,7 +250,7 @@ pub async fn bot_thread(
             if hash != message_hash || hash == 0 || message_hash == 0 {
                 let res = http
                     .execute_request(
-                        trace_id,
+                        &tx,
                         http.edit_message(
                             weekends_message.discord_channel,
                             weekends_message.discord_id,
@@ -251,32 +260,26 @@ pub async fn bot_thread(
                     .await?
                     .error_for_status()?;
                 _ = res;
-                database::update_message_hash(
-                    &db_conn,
-                    trace_id,
-                    weekends_message.id,
-                    hash.to_string(),
-                )
-                .await?
+                database::update_message_hash(&db_conn, &tx, weekends_message.id, hash.to_string())
+                    .await?
             }
             'f2_notify: {
                 let Some(weekend) = next_f2_weekend else {
                     break 'f2_notify;
                 };
-                let Some(next_session) =
-                    database::next_session(&db_conn, trace_id, weekend.id).await?
+                let Some(next_session) = database::next_session(&db_conn, &tx, weekend.id).await?
                 else {
                     break 'f2_notify;
                 };
                 let time_check = Utc::now() + chrono::Duration::minutes(5);
                 if next_session.start_time > Utc::now() && next_session.start_time < time_check {
-                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    mark_session_finished(&db_conn, &tx, next_session.id).await?;
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f2_notify;
                     }
                     let new_message: CreateMessageResponse = http
                         .execute_request(
-                            trace_id,
+                            &tx,
                             http.create_message(&feeder_channel)
                                 .json(&Content::new("Notifications Test!")),
                         )
@@ -287,7 +290,7 @@ pub async fn bot_thread(
 
                     database::new_notify_message(
                         &db_conn,
-                        trace_id,
+                        &tx,
                         new_message.channel_id,
                         new_message.id,
                         next_session.start_time
@@ -301,20 +304,19 @@ pub async fn bot_thread(
                 let Some(weekend) = next_f3_weekend else {
                     break 'f3_notify;
                 };
-                let Some(next_session) =
-                    database::next_session(&db_conn, trace_id, weekend.id).await?
+                let Some(next_session) = database::next_session(&db_conn, &tx, weekend.id).await?
                 else {
                     break 'f3_notify;
                 };
                 let time_check = Utc::now() + chrono::Duration::minutes(5);
                 if next_session.start_time > Utc::now() && next_session.start_time < time_check {
-                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    mark_session_finished(&db_conn, &tx, next_session.id).await?;
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f3_notify;
                     }
                     let new_message: CreateMessageResponse = http
                         .execute_request(
-                            trace_id,
+                            &tx,
                             http.create_message(&feeder_channel)
                                 .json(&Content::new("Notifications Test!")),
                         )
@@ -325,7 +327,7 @@ pub async fn bot_thread(
 
                     database::new_notify_message(
                         &db_conn,
-                        trace_id,
+                        &tx,
                         new_message.channel_id,
                         new_message.id,
                         next_session.start_time
@@ -339,20 +341,19 @@ pub async fn bot_thread(
                 let Some(weekend) = next_f1a_weekend else {
                     break 'f1a_notify;
                 };
-                let Some(next_session) =
-                    database::next_session(&db_conn, trace_id, weekend.id).await?
+                let Some(next_session) = database::next_session(&db_conn, &tx, weekend.id).await?
                 else {
                     break 'f1a_notify;
                 };
                 let time_check = Utc::now() + chrono::Duration::minutes(5);
                 if next_session.start_time > Utc::now() && next_session.start_time < time_check {
-                    mark_session_finished(&db_conn, trace_id, next_session.id).await?;
+                    mark_session_finished(&db_conn, &tx, next_session.id).await?;
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f1a_notify;
                     }
                     let new_message: CreateMessageResponse = http
                         .execute_request(
-                            trace_id,
+                            &tx,
                             http.create_message(&feeder_channel)
                                 .json(&Content::new("Notifications Test!")),
                         )
@@ -362,7 +363,7 @@ pub async fn bot_thread(
                         .await?;
                     database::new_notify_message(
                         &db_conn,
-                        trace_id,
+                        &tx,
                         new_message.channel_id,
                         new_message.id,
                         next_session.start_time
@@ -375,16 +376,17 @@ pub async fn bot_thread(
         }
 
         {
-            for message in database::expired_messages(&db_conn, trace_id).await? {
+            for message in database::expired_messages(&db_conn, &tx).await? {
                 http.execute_request(
-                    trace_id,
+                    &tx,
                     http.delete_message(message.discord_channel, message.discord_id),
                 )
                 .await?
                 .error_for_status()?;
-                database::delete_message(&db_conn, trace_id, message.id).await?;
+                database::delete_message(&db_conn, &tx, message.id).await?;
             }
         }
+        sentry::end_session();
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
     info!("Bot Thread shutdown");
@@ -597,7 +599,7 @@ impl<'a> Content<'a> {
 async fn create_event_message(
     db_conn: &libsql::Connection,
     http: &Http,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     channel: &str,
     weekend: &f1_bot_types::Weekend,
     sessions: &Vec<Session>,
@@ -605,7 +607,7 @@ async fn create_event_message(
     let content = persistent_msg_f1(weekend, sessions)?;
     let response = http
         .execute_request(
-            trace_id,
+            tx,
             http.create_message(channel)
                 .json(&Content { content: &content }),
         )
@@ -617,7 +619,9 @@ async fn create_event_message(
     let new_hash = std::hash::Hasher::finish(&hasher).to_string();
 
     let new_message_data: CreateMessageResponse = response.json().await?;
-    _ = db_conn.execute(
+    database::insert(
+        db_conn,
+        tx,
         "INSERT INTO messages (discord_id, discord_channel, kind, series, expires_at, hash) VALUES (?, ?, ?, ?, ?, ?)", 
         params![
             new_message_data.id.clone(),
@@ -646,7 +650,7 @@ async fn create_event_message(
 async fn create_feeder_message(
     db_conn: &libsql::Connection,
     http: &Http,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     channel: &str,
     data: [(&Option<Weekend>, &Vec<Session>); 3],
 ) -> ErrResult<Message> {
@@ -657,7 +661,7 @@ async fn create_feeder_message(
     let expires_at = Utc::now() + chrono::Duration::days(100);
     let res = http
         .execute_request(
-            trace_id,
+            tx,
             http.create_message(channel).json(&Content::new(&content)),
         )
         .await?
@@ -665,7 +669,7 @@ async fn create_feeder_message(
     let new_message_data: CreateMessageResponse = res.json().await?;
     let new_id = database::insert(
         db_conn,
-        trace_id,
+        tx,
         r#"INSERT INTO messages
     (discord_channel, discord_id, kind, series, hash, expires_at) 
     VALUES (?, ?, ?, ?, ?, ?)"#,

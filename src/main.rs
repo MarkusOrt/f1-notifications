@@ -14,6 +14,7 @@ use crate::{bot::bot_thread, http::http_api};
 pub mod bot;
 mod error;
 mod http;
+mod instrument;
 
 #[derive(Debug, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]

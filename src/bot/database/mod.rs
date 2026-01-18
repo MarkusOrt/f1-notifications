@@ -2,19 +2,18 @@
 use chrono::{DateTime, Utc};
 use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend, WeekendStatus};
 use libsql::{ffi::SQLITE_IOCAP_ATOMIC8K, params};
-use sentry::{TransactionContext, protocol::TraceId};
 use serde::de::DeserializeOwned;
 
 use crate::error::ErrResult;
 
 pub async fn weekends_for_series(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     series: Series,
 ) -> ErrResult<Vec<Weekend>> {
     self::fetch(
         db_conn,
-        trace_id,
+        tx,
         r#"SELECT * FROM weekends 
         WHERE series = ? ORDER BY start_date ASC"#,
         params![series],
@@ -24,74 +23,74 @@ pub async fn weekends_for_series(
 
 pub async fn fetch<T: DeserializeOwned + Sized>(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     sql: &str,
     params: impl libsql::params::IntoParams,
 ) -> ErrResult<Vec<T>> {
-    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
-    tx.set_tag("db.operation", "SELECT");
-    tx.set_extra("db.statement", sql.into());
+    let span = tx.start_child("db", sql);
+    span.set_tag("db.operation", "SELECT");
+    span.set_data("db.statement", sql.into());
 
     let mut cursor = db_conn.query(sql, params).await?;
     let mut return_value: Vec<T> = Vec::new();
     while let Ok(Some(row)) = cursor.next().await {
         return_value.push(libsql::de::from_row(&row)?);
     }
-    tx.set_data("rows_returned", return_value.len().into());
-    tx.set_status(sentry::protocol::SpanStatus::Ok);
-    tx.finish();
+    span.set_data("rows_returned", return_value.len().into());
+    span.set_status(sentry::protocol::SpanStatus::Ok);
+    span.finish();
     Ok(return_value)
 }
 
 pub async fn fetch_optional<T: DeserializeOwned + Sized>(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     sql: &str,
     params: impl libsql::params::IntoParams,
 ) -> ErrResult<Option<T>> {
-    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
-    tx.set_tag("db.operation", "SELECT");
-    tx.set_extra("db.statement", sql.into());
+    let span = tx.start_child("db", sql);
+    span.set_tag("db.operation", "SELECT");
+    span.set_data("db.statement", sql.into());
 
     let mut cursor = db_conn.query(sql, params).await?;
     let mut return_value: Vec<T> = Vec::new();
     if let Ok(Some(row)) = cursor.next().await {
-        tx.set_data("rows_returned", 1.into());
-        tx.set_status(sentry::protocol::SpanStatus::Ok);
-        tx.finish();
+        span.set_data("rows_returned", 1.into());
+        span.set_status(sentry::protocol::SpanStatus::Ok);
+        span.finish();
         Ok(Some(libsql::de::from_row(&row)?))
     } else {
-        tx.set_data("rows_returned", 0.into());
-        tx.set_status(sentry::protocol::SpanStatus::Ok);
-        tx.finish();
+        span.set_data("rows_returned", 0.into());
+        span.set_status(sentry::protocol::SpanStatus::Ok);
+        span.finish();
         Ok(None)
     }
 }
 
 pub async fn update(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     sql: &str,
     params: impl libsql::params::IntoParams,
 ) -> ErrResult {
-    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
-    tx.set_tag("db.operation", "UPDATE");
-    tx.set_extra("db.statement", sql.into());
+    let span = tx.start_child("db", sql);
+    span.set_tag("db.operation", "UPDATE");
+    span.set_data("db.statement", sql.into());
     let res = db_conn.execute(sql, params).await?;
-    tx.set_tag("rows_affected", res);
-    tx.set_status(sentry::protocol::SpanStatus::Ok);
-    tx.finish();
+    span.set_tag("rows_affected", res);
+    span.set_status(sentry::protocol::SpanStatus::Ok);
+    span.finish();
     Ok(())
 }
 
 pub async fn next_weekend(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     series: Series,
 ) -> ErrResult<Option<Weekend>> {
     self::fetch_optional(
         db_conn,
-        trace_id,
+        tx,
         r#"SELECT * FROM weekends 
             WHERE series = ? 
             AND status = ? 
@@ -104,12 +103,12 @@ pub async fn next_weekend(
 
 pub async fn sessions_for_weekend(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     weekend_id: u64,
 ) -> ErrResult<Vec<Session>> {
     self::fetch(
         db_conn,
-        trace_id,
+        tx,
         r#"SELECT * FROM sessions 
             WHERE weekend_id = ? 
             ORDER BY start_time"#,
@@ -120,12 +119,12 @@ pub async fn sessions_for_weekend(
 
 pub async fn next_session(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     weekend_id: u64,
 ) -> ErrResult<Option<Session>> {
     self::fetch_optional(
         db_conn,
-        trace_id,
+        tx,
         r#"SELECT * FROM sessions 
         WHERE status != ? 
         AND weekend_id = ? 
@@ -138,13 +137,13 @@ pub async fn next_session(
 
 pub async fn update_message_hash(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     message_id: u64,
     new_hash: String,
 ) -> ErrResult {
     self::update(
         db_conn,
-        trace_id,
+        tx,
         "UPDATE messages SET hash = ? WHERE id = ?",
         params![new_hash, message_id],
     )
@@ -153,12 +152,12 @@ pub async fn update_message_hash(
 
 pub async fn get_calendar_messages(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     series: Series,
 ) -> ErrResult<Vec<Message>> {
     self::fetch(
         db_conn,
-        trace_id,
+        tx,
         r#"SELECT * FROM messages 
             WHERE series = ? 
             AND kind = ?"#,
@@ -169,11 +168,11 @@ pub async fn get_calendar_messages(
 
 pub async fn all_sessions(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
 ) -> ErrResult<Vec<Session>> {
     self::fetch(
         db_conn,
-        trace_id,
+        tx,
         "SELECT * FROM sessions ORDER BY start_time ASC",
         params![],
     )
@@ -182,28 +181,28 @@ pub async fn all_sessions(
 
 pub async fn insert(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     sql: &str,
     params: impl libsql::params::IntoParams,
 ) -> ErrResult<i64> {
-    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
-    tx.set_tag("db.operation", "INSERT");
-    tx.set_extra("db.statement", sql.into());
+    let span = tx.start_child("db", sql);
+    span.set_tag("db.operation", "INSERT");
+    span.set_data("db.statement", sql.into());
     let res = db_conn.execute(sql, params).await?;
-    tx.set_tag("rows_affected", res);
-    tx.set_status(sentry::protocol::SpanStatus::Ok);
-    tx.finish();
+    span.set_tag("rows_affected", res);
+    span.set_status(sentry::protocol::SpanStatus::Ok);
+    span.finish();
     Ok(db_conn.last_insert_rowid())
 }
 
 pub async fn get_event_message(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     series: Series,
 ) -> ErrResult<Option<Message>> {
     fetch_optional(
         db_conn,
-        trace_id,
+        tx,
         "SELECT * FROM messages WHERE series = ? AND kind = ? LIMIT 1",
         params![series, MessageKind::Weekend],
     )
@@ -212,28 +211,28 @@ pub async fn get_event_message(
 
 pub async fn delete(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     sql: &str,
     params: impl libsql::params::IntoParams,
 ) -> Result<(), libsql::Error> {
-    let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(sql, "db", trace_id));
-    tx.set_tag("db.operation", "DELETE");
-    tx.set_extra("db.statement", sql.into());
+    let span = tx.start_child("db", sql);
+    span.set_tag("db.operation", "DELETE");
+    span.set_data("db.statement", sql.into());
     let res = db_conn.execute(sql, params).await?;
-    tx.set_tag("rows_affected", res);
-    tx.set_status(sentry::protocol::SpanStatus::Ok);
-    tx.finish();
+    span.set_tag("rows_affected", res);
+    span.set_status(sentry::protocol::SpanStatus::Ok);
+    span.finish();
     Ok(())
 }
 
 pub async fn delete_message(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     message_id: u64,
 ) -> Result<(), libsql::Error> {
     self::delete(
         db_conn,
-        trace_id,
+        tx,
         "DELETE FROM messages WHERE id = ?",
         params![message_id],
     )
@@ -242,12 +241,12 @@ pub async fn delete_message(
 
 pub async fn mark_session_finished(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     session_id: i64,
 ) -> ErrResult {
     self::update(
         db_conn,
-        trace_id,
+        tx,
         "UPDATE sessions SET status = ? WHERE id = ?",
         params![SessionStatus::Finished, session_id],
     )
@@ -256,11 +255,11 @@ pub async fn mark_session_finished(
 
 pub async fn expired_messages(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
 ) -> ErrResult<Vec<Message>> {
     self::fetch(
         db_conn,
-        trace_id,
+        tx,
         "SELECT * FROM messages WHERE strftime('%Y-%m-%dT%H:%M:%SZ', CURRENT_TIMESTAMP) > expires_at",
         (),
     )
@@ -269,7 +268,7 @@ pub async fn expired_messages(
 
 pub async fn new_notify_message(
     db_conn: &libsql::Connection,
-    trace_id: TraceId,
+    tx: &sentry::Transaction,
     channel: String,
     discord_id: String,
     expiry: DateTime<Utc>,
@@ -277,7 +276,7 @@ pub async fn new_notify_message(
 ) -> ErrResult<i64> {
     self::insert(
         db_conn,
-        trace_id,
+        tx,
         r#"INSERT INTO messages
     (discord_channel, discord_id, expires_at, kind, series) VALUES (?, ?, ?, ?, ?)"#,
         params![

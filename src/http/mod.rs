@@ -101,12 +101,6 @@ async fn interaction(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    let trace_id = sentry::Hub::current().configure_scope(|f| {
-        f.get_span()
-            .map(|f| f.get_trace_context().trace_id)
-            .unwrap_or_default()
-    });
-
     let (Some(signature), Some(timestamp)) = (
         headers.get("X-Signature-Ed25519"),
         headers.get("X-Signature-Timestamp"),
@@ -146,8 +140,9 @@ async fn interaction(
             "Unauthorized.".to_owned(),
         );
     }
-
     let serialized_body: InteractionReceive = serde_json::from_str(&body).unwrap();
+    let tx = sentry::configure_scope(|f| f.get_span());
+
     match serialized_body.kind {
         Interaction::Ping => {
             let response = serde_json::to_string(&DiscordResponse { kind: 1 }).unwrap();
@@ -161,7 +156,7 @@ async fn interaction(
             _ = state
                 .http
                 .execute_request(
-                    trace_id,
+                    &tx,
                     state
                         .http
                         .interaction_response(serialized_body.id, serialized_body.token)

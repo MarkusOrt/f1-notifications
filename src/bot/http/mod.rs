@@ -5,13 +5,13 @@ use std::{fmt::Display, time::Duration};
 
 use axum::http::HeaderMap;
 use reqwest::{RequestBuilder, Response, header::AUTHORIZATION};
-use sentry::{
-    TransactionContext,
-    protocol::{SpanStatus, TraceId},
-};
+use sentry::protocol::SpanStatus;
 use tracing::info;
 
-use crate::USER_AGENT;
+use crate::{
+    USER_AGENT,
+    instrument::{IntoOptionSpan, OptionSpan},
+};
 
 #[derive(Clone, Debug)]
 pub struct Http(reqwest::Client);
@@ -89,7 +89,7 @@ impl Http {
 
     pub async fn execute_request(
         &self,
-        trace_id: TraceId,
+        tx: impl IntoOptionSpan,
         request: reqwest::RequestBuilder,
     ) -> Result<Response, reqwest::Error> {
         #[derive(serde::Deserialize)]
@@ -106,12 +106,12 @@ impl Http {
             let copy = request.try_clone().unwrap();
 
             let request = copy.build()?;
-            let tx = sentry::start_transaction(TransactionContext::new_with_trace_id(
-                format!("{} {}", request.method(), request.url()).as_str(),
+            let tx: OptionSpan = tx.into_os(
                 "http.client",
-                trace_id,
-            ));
+                format!("{} {}", request.method(), request.url()).as_str(),
+            );
             tx.set_tag("http.method", request.method());
+
             tx.set_request(sentry::protocol::Request {
                 url: Some(request.url().clone()),
                 method: Some(request.method().to_string()),
@@ -129,11 +129,11 @@ impl Http {
                     "Got Rate limited, waiting for {} seconds.",
                     retry.retry_after
                 );
-                let span = tx.start_child("rate_limit.wait", "Waiting for Rate Limits");
+                let wait_span = tx.start_child("rate_limit.wait", "Waiting for Rate Limits");
                 tx.set_tag("rate_limited", true);
-                span.set_data("retry_after", retry.retry_after.into());
+                wait_span.set_data("retry_after", retry.retry_after.into());
                 tokio::time::sleep(retry.into()).await;
-                span.finish();
+                wait_span.finish();
                 tx.set_status(SpanStatus::Ok);
                 tx.finish();
                 continue;
