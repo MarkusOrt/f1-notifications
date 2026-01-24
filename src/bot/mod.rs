@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::os::windows::fs::MetadataExt;
 use std::time::Duration;
 use std::{fmt::Write, hash::Hash};
 
@@ -41,8 +40,7 @@ struct CreateMessageResponse {
 
 pub async fn load_video(path: &str) -> ErrResult<Vec<u8>> {
     let mut file = tokio::fs::File::open(path).await?;
-    let meta = file.metadata().await?;
-    let mut vec = Vec::with_capacity(meta.file_size() as usize);
+    let mut vec = Vec::with_capacity(6_000_000);
     file.read_to_end(&mut vec).await?;
     Ok(vec)
 }
