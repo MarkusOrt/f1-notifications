@@ -13,6 +13,10 @@ COPY --from=builder /app/target/release/f1-notifications /app/f1-notifications
 COPY --from=builder /app/target/release/migrate /app/migrate
 COPY --from=builder /app/target/release/reserve-calendar-space /app/reserve-calendar-space
 
+RUN mkdir /app/data
+
+COPY --from=builder /app/data/cats.mp4 /app/data/cats.mp4
+
 RUN chmod +x /app/f1-notifications
 RUN chmod +x /app/migrate
 RUN chmod +x /app/reserve-calendar-space
