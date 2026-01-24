@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::os::windows::fs::MetadataExt;
 use std::time::Duration;
 use std::{fmt::Write, hash::Hash};
@@ -8,6 +9,7 @@ use f1_bot_types::{
     WeekendStatus,
 };
 use libsql::params;
+use reqwest::multipart::Part;
 use sentry::TransactionContext;
 use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast::Receiver;
@@ -50,7 +52,7 @@ pub async fn bot_thread(
     http: http::Http,
     db_conn: libsql::Connection,
 ) -> ErrResult {
-    let _video = load_video("data/cats.mp4").await?;
+    let video = load_video("data/cats.mp4").await?.leak();
     info!("Bot thread starting.");
     loop {
         sentry::start_session();
@@ -180,12 +182,22 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f1_notify;
                     }
-                    let new_message: CreateMessageResponse = http
-                        .execute_request(
-                            &tx,
-                            http.create_message(&f1_channel)
-                                .json(&Content::new(&next_session.name)),
+                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
+                    let content = reqwest::multipart::Form::new()
+                        .part(
+                            "content",
+                            Part::text(format!(
+                                "{} {} {} started <t:{}:R>",
+                                f1_weekend.icon,
+                                f1_weekend.name,
+                                next_session.name,
+                                next_session.start_time.timestamp()
+                            )),
                         )
+                        .part("files[0]", Part::bytes(sc));
+
+                    let new_message: CreateMessageResponse = http
+                        .execute_request(&tx, http.create_message(&f1_channel).multipart(content))
                         .await?
                         .error_for_status()?
                         .json()
@@ -277,11 +289,23 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f2_notify;
                     }
+                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
+                    let content = reqwest::multipart::Form::new()
+                        .part(
+                            "content",
+                            Part::text(format!(
+                                "{} {} {} started <t:{}:R>",
+                                weekend.icon,
+                                weekend.name,
+                                next_session.name,
+                                next_session.start_time.timestamp()
+                            )),
+                        )
+                        .part("files[0]", Part::bytes(sc));
                     let new_message: CreateMessageResponse = http
                         .execute_request(
                             &tx,
-                            http.create_message(&feeder_channel)
-                                .json(&Content::new("Notifications Test!")),
+                            http.create_message(&feeder_channel).multipart(content),
                         )
                         .await?
                         .error_for_status()?
@@ -314,11 +338,23 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f3_notify;
                     }
+                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
+                    let content = reqwest::multipart::Form::new()
+                        .part(
+                            "content",
+                            Part::text(format!(
+                                "{} {} {} started <t:{}:R>",
+                                weekend.icon,
+                                weekend.name,
+                                next_session.name,
+                                next_session.start_time.timestamp()
+                            )),
+                        )
+                        .part("files[0]", Part::bytes(sc));
                     let new_message: CreateMessageResponse = http
                         .execute_request(
                             &tx,
-                            http.create_message(&feeder_channel)
-                                .json(&Content::new("Notifications Test!")),
+                            http.create_message(&feeder_channel).multipart(content),
                         )
                         .await?
                         .error_for_status()?
@@ -351,16 +387,29 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f1a_notify;
                     }
+                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
+                    let content = reqwest::multipart::Form::new()
+                        .part(
+                            "content",
+                            Part::text(format!(
+                                "{} {} {} started <t:{}:R>",
+                                weekend.icon,
+                                weekend.name,
+                                next_session.name,
+                                next_session.start_time.timestamp()
+                            )),
+                        )
+                        .part("files[0]", Part::bytes(sc));
                     let new_message: CreateMessageResponse = http
                         .execute_request(
                             &tx,
-                            http.create_message(&feeder_channel)
-                                .json(&Content::new("Notifications Test!")),
+                            http.create_message(&feeder_channel).multipart(content),
                         )
                         .await?
                         .error_for_status()?
                         .json()
                         .await?;
+
                     database::new_notify_message(
                         &db_conn,
                         &tx,
