@@ -172,7 +172,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     info!("Shutting Down");
-                    shutdown_tx.send(())?;
                 }
                 res = js.join_next() => {
                     match res {
@@ -189,6 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 }
             }
+            shutdown_tx.send(())?;
             while let Some(t) = js.join_next().await {
                 match t {
                     Err(why) => {
