@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::time::Duration;
 use std::{fmt::Write, hash::Hash};
 
@@ -51,6 +50,10 @@ pub async fn bot_thread(
     db_conn: libsql::Connection,
 ) -> ErrResult {
     let video = load_video("data/cats.mp4").await?.leak();
+    let f1_role = std::env::var("F1_ROLE")?;
+    let f2_role = std::env::var("F2_ROLE")?;
+    let f3_role = std::env::var("F3_ROLE")?;
+    let f1a_role = std::env::var("F1A_ROLE")?;
     info!("Bot thread starting.");
     loop {
         sentry::start_session();
@@ -180,22 +183,27 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f1_notify;
                     }
-                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
                     let content = reqwest::multipart::Form::new()
                         .part(
                             "content",
                             Part::text(format!(
-                                "{} {} {} started <t:{}:R>",
+                                "<@&{}> {} {} {} started <t:{}:R>",
+                                f1_role,
                                 f1_weekend.icon,
                                 f1_weekend.name,
                                 next_session.name,
                                 next_session.start_time.timestamp()
                             )),
                         )
-                        .part("files[0]", Part::bytes(sc));
+                        .part(
+                            "files[0]",
+                            Part::bytes(video.to_owned()).file_name("bongocat.mp4"),
+                        );
 
                     let new_message: CreateMessageResponse = http
-                        .execute_request(&tx, http.create_message(&f1_channel).multipart(content))
+                        .create_message(&f1_channel)
+                        .multipart(content)
+                        .send()
                         .await?
                         .error_for_status()?
                         .json()
@@ -287,24 +295,26 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f2_notify;
                     }
-                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
                     let content = reqwest::multipart::Form::new()
                         .part(
                             "content",
                             Part::text(format!(
-                                "{} {} {} started <t:{}:R>",
+                                "<@&{}> {} {} {} started <t:{}:R>",
+                                f2_role,
                                 weekend.icon,
                                 weekend.name,
                                 next_session.name,
                                 next_session.start_time.timestamp()
                             )),
                         )
-                        .part("files[0]", Part::bytes(sc));
+                        .part(
+                            "files[0]",
+                            Part::bytes(video.to_owned()).file_name("bongocat.mp4"),
+                        );
                     let new_message: CreateMessageResponse = http
-                        .execute_request(
-                            &tx,
-                            http.create_message(&feeder_channel).multipart(content),
-                        )
+                        .create_message(&feeder_channel)
+                        .multipart(content)
+                        .send()
                         .await?
                         .error_for_status()?
                         .json()
@@ -336,24 +346,26 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f3_notify;
                     }
-                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
                     let content = reqwest::multipart::Form::new()
                         .part(
                             "content",
                             Part::text(format!(
-                                "{} {} {} started <t:{}:R>",
+                                "<@&{}> {} {} {} started <t:{}:R>",
+                                f3_role,
                                 weekend.icon,
                                 weekend.name,
                                 next_session.name,
                                 next_session.start_time.timestamp()
                             )),
                         )
-                        .part("files[0]", Part::bytes(sc));
+                        .part(
+                            "files[0]",
+                            Part::bytes(video.to_owned()).file_name("bongocat.mp4"),
+                        );
                     let new_message: CreateMessageResponse = http
-                        .execute_request(
-                            &tx,
-                            http.create_message(&feeder_channel).multipart(content),
-                        )
+                        .create_message(&feeder_channel)
+                        .multipart(content)
+                        .send()
                         .await?
                         .error_for_status()?
                         .json()
@@ -385,24 +397,26 @@ pub async fn bot_thread(
                     if next_session.notify == SessionNotifySettings::Ignore {
                         break 'f1a_notify;
                     }
-                    let sc: Cow<'static, [u8]> = Cow::Borrowed(video);
                     let content = reqwest::multipart::Form::new()
                         .part(
                             "content",
                             Part::text(format!(
-                                "{} {} {} started <t:{}:R>",
+                                "<@&{}> {} {} {} started <t:{}:R>",
+                                f1a_role,
                                 weekend.icon,
                                 weekend.name,
                                 next_session.name,
                                 next_session.start_time.timestamp()
                             )),
                         )
-                        .part("files[0]", Part::bytes(sc));
+                        .part(
+                            "files[0]",
+                            Part::bytes(video.to_owned()).file_name("bongocat.mp4"),
+                        );
                     let new_message: CreateMessageResponse = http
-                        .execute_request(
-                            &tx,
-                            http.create_message(&feeder_channel).multipart(content),
-                        )
+                        .create_message(&feeder_channel)
+                        .multipart(content)
+                        .send()
                         .await?
                         .error_for_status()?
                         .json()
