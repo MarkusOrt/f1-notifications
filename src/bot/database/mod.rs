@@ -1,7 +1,7 @@
 #![allow(unused)]
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use f1_bot_types::{Message, MessageKind, Series, Session, SessionStatus, Weekend, WeekendStatus};
-use libsql::{ffi::SQLITE_IOCAP_ATOMIC8K, params};
+use libsql::{de::from_row, ffi::SQLITE_IOCAP_ATOMIC8K, params};
 use serde::de::DeserializeOwned;
 
 use crate::error::ErrResult;
@@ -19,6 +19,16 @@ pub async fn weekends_for_series(
         params![series],
     )
     .await
+}
+
+pub async fn session(db_conn: &libsql::Connection, session_id: u64) -> ErrResult<Option<Session>> {
+    let mut cursor = db_conn
+        .query("SELECT * FROM sessions WHERE id = ?", params![session_id])
+        .await?;
+    Ok(match cursor.next().await? {
+        Some(r) => Some(libsql::de::from_row::<Session>(&r)?),
+        None => None,
+    })
 }
 
 pub async fn fetch<T: DeserializeOwned + Sized>(
@@ -115,6 +125,35 @@ pub async fn sessions_for_weekend(
         params![weekend_id],
     )
     .await
+}
+
+pub async fn sessions_for_weekend_notx(
+    db_conn: &libsql::Connection,
+    weekend_id: u64,
+) -> ErrResult<Vec<Session>> {
+    let mut cursor = db_conn
+        .query(
+            "SELECT * FROM sessions WHERE weekend_id = ? ORDER BY start_time",
+            params![weekend_id],
+        )
+        .await?;
+    let mut return_value = Vec::with_capacity(5);
+
+    while let Ok(Some(row)) = cursor.next().await {
+        return_value.push(libsql::de::from_row(&row)?);
+    }
+    Ok(return_value)
+}
+
+pub async fn weekend(db_conn: &libsql::Connection, weekend_id: u64) -> ErrResult<Weekend> {
+    let mut cursor = db_conn
+        .query("SELECT * FROM weekends WHERE id = ?", params![weekend_id])
+        .await?;
+    if let Some(row) = cursor.next().await? {
+        return Ok(libsql::de::from_row(&row)?);
+    } else {
+        return Err(crate::error::Error::NotFound);
+    }
 }
 
 pub async fn next_session(
@@ -223,6 +262,19 @@ pub async fn delete(
     span.set_status(sentry::protocol::SpanStatus::Ok);
     span.finish();
     Ok(())
+}
+
+pub async fn all_weekends(
+    db_conn: &libsql::Connection,
+) -> Result<Vec<Weekend>, crate::error::Error> {
+    let mut cursor = db_conn
+        .query("SELECT * FROM weekends ORDER BY start_date", params![])
+        .await?;
+    let mut return_value = Vec::with_capacity(24);
+    while let Ok(Some(row)) = cursor.next().await {
+        return_value.push(libsql::de::from_row(&row)?);
+    }
+    Ok(return_value)
 }
 
 pub async fn delete_message(

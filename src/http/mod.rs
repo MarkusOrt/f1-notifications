@@ -4,21 +4,38 @@ use axum::{
     extract::State,
     http::{HeaderMap, Request},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post, put},
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use reqwest::{StatusCode, header::CONTENT_TYPE};
 use std::fmt::Write;
 use tokio::sync::broadcast::Receiver;
 use tower::ServiceBuilder;
+use tower_http::services::ServeDir;
 use tracing::info;
 
+mod html;
 mod message;
+mod pages {
+    pub mod home_page;
+    pub mod sessions_page;
+}
+
+mod auth;
+
+mod routes {
+    pub mod edit_event;
+    pub mod edit_session;
+}
+
+use pages::*;
+use routes::*;
 
 #[derive(Clone, Debug)]
 struct AxumState<'a> {
     pub public_key: &'a VerifyingKey,
     pub http: crate::bot::http::Http,
+    pub db_pool: libsql::Connection,
 }
 
 pub async fn http_api(
@@ -27,7 +44,6 @@ pub async fn http_api(
     data: crate::RequiredData,
     db_conn: libsql::Connection,
 ) -> ErrResult {
-    _ = db_conn;
     let mut public_key = [0u8; 32];
     hex::decode_to_slice(data.public_key, &mut public_key)?;
     let vk = Box::leak(Box::new(VerifyingKey::from_bytes(&public_key)?));
@@ -35,10 +51,41 @@ pub async fn http_api(
     let router = axum::Router::new()
         .route("/interaction", post(interaction))
         .route("/health", get(health))
+        .route("/", get(home_page::get))
+        .route("/auth", get(auth::auth))
+        .route("/post-auth", get(auth::post_auth))
+        .route(
+            "/events/{event_id}/sessions/render",
+            get(sessions_page::get),
+        )
+        .route("/events/{event_id}/dialog", get(edit_event::event_dialog))
+        .route("/events/{event_id}", put(edit_event::update_event))
+        .route("/events/{event_id}", delete(edit_event::delete_event))
+        .route("/events/", post(edit_event::new_weekend))
+        .route(
+            "/sessions/{session_id}/dialog",
+            get(sessions_page::edit_dialog),
+        )
+        .route(
+            "/sessions/{session_id}/notif-off",
+            put(edit_session::notifications_off),
+        )
+        .route(
+            "/sessions/{session_id}/notif-on",
+            put(edit_session::notifications_on),
+        )
+        .route("/sessions/{session_id}", put(edit_session::update_session))
+        .route(
+            "/sessions/{session_id}",
+            delete(edit_session::delete_session),
+        )
+        .route("/sessions/", post(edit_session::new_session))
         .with_state(AxumState {
             public_key: vk,
             http,
+            db_pool: db_conn,
         })
+        .nest_service("/assets", ServeDir::new("./assets/"))
         .fallback(fallback)
         .layer(
             ServiceBuilder::new()

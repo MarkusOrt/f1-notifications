@@ -20,7 +20,7 @@ use crate::bot::http::Http;
 use crate::error::ErrResult;
 
 pub mod calendar;
-mod database;
+pub mod database;
 pub mod http;
 
 #[allow(unused)]

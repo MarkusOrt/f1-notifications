@@ -1,6 +1,17 @@
 #![allow(unused)]
 use std::error::Error as StdError;
 
+use axum::{
+    body::Body,
+    http::HeaderValue,
+    response::{IntoResponse, Response},
+};
+use reqwest::{StatusCode, header::CONTENT_TYPE};
+
+pub mod form_validation;
+
+pub use form_validation::FormValidation;
+
 #[derive(Debug)]
 pub enum Error {
     Http(reqwest::Error),
@@ -16,6 +27,9 @@ pub enum Error {
     Send(tokio::sync::broadcast::error::SendError<()>),
     Join(tokio::task::JoinError),
     Var(std::env::VarError),
+    NotFound,
+    Unauthorized,
+    Form(FormValidation),
 }
 
 pub type ErrResult<T = ()> = Result<T, Error>;
@@ -36,6 +50,9 @@ impl StdError for Error {
             Error::Send(error) => Some(error),
             Error::Join(error) => Some(error),
             Error::Var(error) => Some(error),
+            Error::NotFound => None,
+            Error::Unauthorized => None,
+            Error::Form(e) => Some(e),
         }
     }
 
@@ -60,6 +77,9 @@ impl std::fmt::Display for Error {
             Error::Send(error) => write!(f, "{error}"),
             Error::Join(error) => write!(f, "{error}"),
             Error::Var(error) => write!(f, "{error}"),
+            Error::NotFound => write!(f, "Not Found"),
+            Error::Unauthorized => write!(f, "Unauthorized"),
+            Error::Form(e) => write!(f, "{e}"),
         }
     }
 }
@@ -139,5 +159,29 @@ impl From<tokio::task::JoinError> for Error {
 impl From<std::env::VarError> for Error {
     fn from(value: std::env::VarError) -> Self {
         Error::Var(value)
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> axum::response::Response {
+        println!("{self}");
+        let mut response = if let Self::Form(e) = &self {
+            let mut response =
+                Response::new(Body::new(serde_json::to_string_pretty(&e.0).unwrap()));
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            response
+        } else {
+            Response::new(Body::empty())
+        };
+        *response.status_mut() = match self {
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Form(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        response
     }
 }
