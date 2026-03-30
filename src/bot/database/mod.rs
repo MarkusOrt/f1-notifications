@@ -150,9 +150,9 @@ pub async fn weekend(db_conn: &libsql::Connection, weekend_id: u64) -> ErrResult
         .query("SELECT * FROM weekends WHERE id = ?", params![weekend_id])
         .await?;
     if let Some(row) = cursor.next().await? {
-        return Ok(libsql::de::from_row(&row)?);
+        Ok(libsql::de::from_row(&row)?)
     } else {
-        return Err(crate::error::Error::NotFound);
+        Err(crate::error::Error::NotFound)
     }
 }
 

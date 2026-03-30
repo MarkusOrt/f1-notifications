@@ -5,7 +5,6 @@ use axum::{
     response::{Html, Redirect},
 };
 use f1_bot_types::Weekend;
-use reqwest::StatusCode;
 
 use crate::{
     bot::database,
@@ -16,7 +15,7 @@ pub async fn get(
     user: Option<User>,
     State(app_state): State<AxumState<'_>>,
 ) -> Result<Result<Html<String>, Redirect>, crate::error::Error> {
-    let Some(user) = user else {
+    if user.is_none() {
         return Ok(Err(Redirect::temporary("/auth")));
     };
     let weekends = database::all_weekends(&app_state.db_pool).await?;

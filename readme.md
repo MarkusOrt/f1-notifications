@@ -50,7 +50,7 @@ services:
 ```
 
 For webui Access you need to change the list of allowed ids in the 
-[`/src/http/auth.rs`](/src/http/auth/rs) file. This may change in the future.
+[`/src/http/auth/mod.rs`](./src/http/auth/mod.rs) file. This may change in the future.
 
 By default the app exposes port 8123 for the HTTP Interface.
 

@@ -122,6 +122,7 @@ pub async fn new_session(
             ],
         )
         .await.inspect_err(|f| println!("{f}"))?;
+    _ = rows;
 
     Ok(StatusCode::NO_CONTENT)
 }
